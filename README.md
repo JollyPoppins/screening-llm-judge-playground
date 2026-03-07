@@ -69,15 +69,16 @@ If API URLs are not set, the app uses mock data so you can test the flow locally
 
 ## Pushing to GitHub (new project)
 
+The project is already initialized with one commit. To push as a **new** GitHub repo:
+
+1. On GitHub: **New repository** → name it `screening-llm-judge` (or any name) → do **not** add a README (we already have one).
+2. Locally, from the project folder:
+
 ```bash
 cd screening-llm-judge
-git init
-git add .
-git commit -m "Initial commit: Screening LLM Judge enterprise evals"
-# Create a new repository on GitHub, then:
 git remote add origin https://github.com/YOUR_USERNAME/screening-llm-judge.git
 git branch -M main
 git push -u origin main
 ```
 
-Replace `YOUR_USERNAME` with your GitHub username (or org) and use the actual repo URL if different.
+Replace `YOUR_USERNAME` with your GitHub username (or org). Use the repo URL GitHub shows (HTTPS or SSH).

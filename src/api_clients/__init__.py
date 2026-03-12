@@ -1,5 +1,5 @@
-from .xplus import xplus_client
-from .spx import spx_client
-from .screening import screening_client
+from .transcript import transcript_client
+from .kb import kb_client
+from .job import job_client, job_details_to_text
 
-__all__ = ["xplus_client", "spx_client", "screening_client"]
+__all__ = ["transcript_client", "kb_client", "job_client", "job_details_to_text"]

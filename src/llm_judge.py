@@ -1,34 +1,61 @@
 """
-LLM Judge: run predefined prompt with transcript + knowledge base; return model output.
-Uses OpenAI-compatible API (env: OPENAI_BASE_URL, OPENAI_API_KEY, LLM_JUDGE_MODEL).
+LLM Judge: run user-editable prompt with placeholders {TS}, {KB}, {JD};
+optionally attach audio from recording URL. Uses Google Gemini.
 """
+from io import BytesIO
 from dataclasses import dataclass
 from typing import Optional
+
+import requests
 
 from src.data_aggregation import AssembledRow
 
 
-# Placeholder prompt; fill placeholders: {{TRANSCRIPT}}, {{KNOWLEDGE_BASE}}
-JUDGE_SYSTEM = """You are an expert evaluator for screening calls. Assess the call against the job/screening criteria and provide:
-1. Issue category (one short label)
-2. Brief comments explaining strengths and issues
-3. Pass/Fail or severity if applicable
-Be concise and consistent with typical human reviewer style."""
+# Default template; user can edit in UI. Placeholders: {TS}, {KB}, {JD}
+DEFAULT_JUDGE_TEMPLATE = """You are an expert evaluator for screening calls. Use the transcript (and optionally the attached audio) plus the knowledge base and job description to assess the call.
 
-JUDGE_USER_TEMPLATE = """## Knowledge Base (Job / Screening Requirements)
-{{KNOWLEDGE_BASE}}
+## Knowledge base (screening requirements)
+{KB}
 
-## Call Transcript
-{{TRANSCRIPT}}
+## Job description
+{JD}
 
-Evaluate this screening call. Provide: Issue category, Comments, and Pass/Fail or severity."""
+## Call transcript
+{TS}
+
+Evaluate this screening call. Provide: (1) Issue category (short label), (2) Brief comments on strengths and issues, (3) Pass/Fail or severity. Be concise and consistent with human reviewer style."""
 
 
-def build_judge_prompt(transcript: str, knowledge_base: str) -> str:
+def fill_prompt(
+    template: str,
+    transcript: str,
+    knowledge_base: str,
+    job_description: str,
+    include_transcript: bool = True,
+    include_kb: bool = True,
+    include_jd: bool = True,
+) -> str:
+    """Replace {TS}, {KB}, {JD} only when corresponding include_* is True; else (not included)."""
+    ts = (transcript or "(No transcript)") if include_transcript else "(not included)"
+    kb = (knowledge_base or "(No knowledge base)") if include_kb else "(not included)"
+    jd = (job_description or "(No job description)") if include_jd else "(not included)"
     return (
-        JUDGE_USER_TEMPLATE.replace("{{TRANSCRIPT}}", transcript or "(No transcript)")
-        .replace("{{KNOWLEDGE_BASE}}", knowledge_base or "(No knowledge base)")
+        template.replace("{TS}", ts)
+        .replace("{KB}", kb)
+        .replace("{JD}", jd)
     )
+
+
+def fetch_audio_bytes(recording_url: str, timeout: int = 60) -> Optional[bytes]:
+    """Fetch audio from recording URL; return bytes or None."""
+    if not recording_url or not recording_url.strip():
+        return None
+    try:
+        r = requests.get(recording_url, timeout=timeout)
+        r.raise_for_status()
+        return r.content
+    except Exception:
+        return None
 
 
 @dataclass
@@ -39,24 +66,63 @@ class JudgeResult:
     error: Optional[str] = None
 
 
-def run_judge(assembled: AssembledRow) -> JudgeResult:
-    """Call LLM with transcript + KB; return JudgeResult."""
+def run_judge(
+    assembled: AssembledRow,
+    prompt_template: str,
+    include_transcript: bool = True,
+    include_kb: bool = True,
+    include_jd: bool = True,
+    include_audio: bool = True,
+) -> JudgeResult:
+    """
+    Call Gemini with filled prompt. Only placeholders for enabled sections are filled;
+    disabled sections get "(not included)". Audio attached only if include_audio.
+    """
     try:
-        import openai
-        from config import OPENAI_API_KEY, OPENAI_BASE_URL, LLM_JUDGE_MODEL
+        import google.generativeai as genai
+        from config import GEMINI_API_KEY, GEMINI_JUDGE_MODEL
 
-        client = openai.OpenAI(api_key=OPENAI_API_KEY or "sk-placeholder", base_url=OPENAI_BASE_URL)
-        prompt = build_judge_prompt(assembled.transcript, assembled.knowledge_base)
-        resp = client.chat.completions.create(
-            model=LLM_JUDGE_MODEL,
-            messages=[
-                {"role": "system", "content": JUDGE_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=1024,
+        if not GEMINI_API_KEY:
+            return JudgeResult(
+                row_number=assembled.row_number,
+                call_id=assembled.call_id,
+                raw_output="",
+                error="GEMINI_API_KEY not set. Add it to .env",
+            )
+
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel(GEMINI_JUDGE_MODEL)
+
+        prompt_text = fill_prompt(
+            prompt_template,
+            assembled.transcript,
+            assembled.knowledge_base,
+            assembled.job_details_text,
+            include_transcript=include_transcript,
+            include_kb=include_kb,
+            include_jd=include_jd,
         )
-        raw = (resp.choices[0].message.content or "").strip()
-        return JudgeResult(row_number=assembled.row_number, call_id=assembled.call_id, raw_output=raw)
+
+        parts = [prompt_text]
+
+        if include_audio and assembled.recording_url:
+            audio_bytes = fetch_audio_bytes(assembled.recording_url)
+            if audio_bytes:
+                import google.generativeai as genai
+                audio_file = genai.upload_file(
+                    path=BytesIO(audio_bytes),
+                    mime_type="audio/ogg",
+                    display_name="screening_recording.ogg",
+                )
+                parts.append(audio_file)
+
+        response = model.generate_content(parts)
+        raw = (response.text or "").strip()
+        return JudgeResult(
+            row_number=assembled.row_number,
+            call_id=assembled.call_id,
+            raw_output=raw,
+        )
     except Exception as e:
         return JudgeResult(
             row_number=assembled.row_number,
@@ -66,5 +132,33 @@ def run_judge(assembled: AssembledRow) -> JudgeResult:
         )
 
 
-def run_judge_for_all(assembled_rows: list[AssembledRow]) -> list[JudgeResult]:
-    return [run_judge(a) for a in assembled_rows]
+def run_judge_one(
+    assembled: AssembledRow,
+    prompt_template: str,
+    include_transcript: bool,
+    include_kb: bool,
+    include_jd: bool,
+    include_audio: bool,
+) -> JudgeResult:
+    return run_judge(
+        assembled,
+        prompt_template,
+        include_transcript=include_transcript,
+        include_kb=include_kb,
+        include_jd=include_jd,
+        include_audio=include_audio,
+    )
+
+
+def run_judge_for_all(
+    assembled_rows: list[AssembledRow],
+    prompt_template: str,
+    include_transcript: bool = True,
+    include_kb: bool = True,
+    include_jd: bool = True,
+    include_audio: bool = True,
+) -> list[JudgeResult]:
+    return [
+        run_judge(a, prompt_template, include_transcript, include_kb, include_jd, include_audio)
+        for a in assembled_rows
+    ]

@@ -1,6 +1,3 @@
-Col A,URL (callId),Col C,Comments (HITL),Col E,Col F,Issue Category (HITL)
-,,,Sample comment A,,,Category 1
-,,,Sample comment B,,,Category 2
-,,,Sample comment C,,,Category 3
-,,,Sample comment D,,,Category 1
-sample,https://agentx-builder.phenom.com/apps/get/f/screening_agent_insights/screeningInterviewInsights?selectedEnv=produs&callId=5fed10b4-56c0-4a33-a9f8-9a43e7b43d17_cid_69a836746f75187b253c78f9,data,Human said: good flow but brief.,extra,f,Needs improvement
+Date,Link,Candidate Name,Comments,AI Rating,Candidate Rating,Issue Categories,Annotator Name,Reviewed By,Week Number,Month,Tenant,Screening Date
+2024-01-15,https://example.com?callId=abc123_cid_xyz,Candidate One,Good flow but brief.,4,5,Needs improvement,Annotator A,Dev Review 1,2,Jan,WORKUS,2024-01-14
+2024-01-16,https://agentx-builder.phenom.com/apps/get/f/screening_agent_insights/screeningInterviewInsights?selectedEnv=produs&callId=5fed10b4-56c0-4a33-a9f8-9a43e7b43d17_cid_69a836746f75187b253c78f9,Jane Doe,Human said: strong answers.,5,5,None,Annotator B,Dev Review 2,2,Jan,PHENA0059,2024-01-15

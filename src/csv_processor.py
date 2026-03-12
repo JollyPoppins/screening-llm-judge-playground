@@ -1,8 +1,7 @@
 """
-CSV processing for Screening LLM Judge.
-- Column B: URL containing callId (query param)
-- Column D: Human reviewer comments (HITL)
-- Column G: Human issue category (HITL)
+CSV processing for Screening LLM Judge (PRD).
+Columns A–M: Date, Link, Candidate Name, Comments, AI Rating, Candidate Rating,
+Issue Categories, Annotator Name, Reviewed By, Week Number, Month, Tenant, Screening Date.
 Row numbers are 1-based (header = row 1).
 """
 import re
@@ -13,10 +12,22 @@ from typing import Optional
 import pandas as pd
 
 
-# Column indices (0-based): B=1, D=3, G=6
-COL_CALL_ID_URL = 1   # Column B
-COL_COMMENTS = 3      # Column D
-COL_ISSUE_CATEGORY = 6  # Column G
+# Column indices (0-based): A=0 .. M=12
+COL_DATE = 0              # A
+COL_LINK = 1              # B
+COL_CANDIDATE_NAME = 2    # C
+COL_COMMENTS = 3          # D
+COL_AI_RATING = 4         # E
+COL_CANDIDATE_RATING = 5  # F
+COL_ISSUE_CATEGORIES = 6  # G (comma-separated)
+COL_ANNOTATOR_NAME = 7    # H
+COL_REVIEWED_BY = 8       # I
+COL_WEEK_NUM = 9          # J
+COL_MONTH = 10            # K
+COL_TENANT = 11           # L (refNum for APIs)
+COL_SCREENING_DATE = 12   # M
+# Optional 14th column for job API
+COL_JOB_SEQ_NO = 13       # N if present
 
 
 @dataclass
@@ -24,9 +35,21 @@ class RowInput:
     """Single row selected for processing."""
     row_number: int
     call_id: str
+    ref_num: str
+    job_seq_no: str
     comments: str
-    issue_category: str
+    issue_categories: str  # Column G, comma-separated
     raw_url: str
+    # Display fields from CSV
+    date: str
+    candidate_name: str
+    ai_rating: str
+    candidate_rating: str
+    annotator_name: str
+    reviewed_by: str
+    week_num: str
+    month: str
+    screening_date: str
 
 
 def extract_call_id_from_url(url: str) -> Optional[str]:
@@ -62,37 +85,85 @@ def parse_row_numbers(value: str) -> list[int]:
 
 
 def load_csv(path: Path) -> pd.DataFrame:
-    """Load CSV; normalize column count by padding if needed."""
+    """Load CSV; ensure at least 13 columns (A–M)."""
     df = pd.read_csv(path)
-    # Ensure we have at least 7 columns (A–G) for indexing
-    while len(df.columns) <= COL_ISSUE_CATEGORY:
+    min_cols = COL_SCREENING_DATE + 1  # 13
+    while len(df.columns) < min_cols:
         df[f"Unnamed_{len(df.columns)}"] = ""
     return df
 
 
+def get_single_row(csv_path: Path, row_number: int) -> tuple[Optional[RowInput], Optional[str]]:
+    """
+    Get exactly one row by 1-based row number.
+    Returns (RowInput, None) on success, or (None, "Row does not exist") if row missing/invalid.
+    """
+    df = load_csv(csv_path)
+    idx = row_number - 1
+    if idx < 0 or idx >= len(df):
+        return None, "Row does not exist"
+    row = df.iloc[idx]
+    raw_url = _cell(row, COL_LINK)
+    call_id = extract_call_id_from_url(raw_url)
+    ref_num = _cell(row, COL_TENANT)
+    if not call_id or not ref_num:
+        return None, "Row does not exist"
+    job_seq_no = _cell(row, COL_JOB_SEQ_NO) if len(row) > COL_JOB_SEQ_NO else ""
+    return RowInput(
+        row_number=row_number,
+        call_id=call_id,
+        ref_num=ref_num,
+        job_seq_no=job_seq_no,
+        comments=_cell(row, COL_COMMENTS),
+        issue_categories=_cell(row, COL_ISSUE_CATEGORIES),
+        raw_url=raw_url,
+        date=_cell(row, COL_DATE),
+        candidate_name=_cell(row, COL_CANDIDATE_NAME),
+        ai_rating=_cell(row, COL_AI_RATING),
+        candidate_rating=_cell(row, COL_CANDIDATE_RATING),
+        annotator_name=_cell(row, COL_ANNOTATOR_NAME),
+        reviewed_by=_cell(row, COL_REVIEWED_BY),
+        week_num=_cell(row, COL_WEEK_NUM),
+        month=_cell(row, COL_MONTH),
+        screening_date=_cell(row, COL_SCREENING_DATE),
+    ), None
+
+
 def get_rows_from_csv(csv_path: Path, row_numbers: list[int]) -> list[RowInput]:
     """
-    For each 1-based row number, read Column B (URL), D (comments), G (issue category).
-    Returns list of RowInput; row_number in RowInput is 1-based.
+    For each 1-based row number, read columns per schema. Link → callId, Tenant → refNum.
+    Skips rows missing callId or refNum (Tenant).
     """
     df = load_csv(csv_path)
     results = []
     for rn in row_numbers:
-        # 1-based: row 1 = index 0 (header), row 5 = index 4
         idx = rn - 1
         if idx < 0 or idx >= len(df):
             continue
         row = df.iloc[idx]
-        raw_url = _cell(row, COL_CALL_ID_URL)
+        raw_url = _cell(row, COL_LINK)
         call_id = extract_call_id_from_url(raw_url)
-        if not call_id:
+        ref_num = _cell(row, COL_TENANT)
+        if not call_id or not ref_num:
             continue
+        job_seq_no = _cell(row, COL_JOB_SEQ_NO) if COL_JOB_SEQ_NO < len(row) else ""  # no-op if COL_JOB_SEQ_NO >= 13
         results.append(RowInput(
             row_number=rn,
             call_id=call_id,
+            ref_num=ref_num,
+            job_seq_no=job_seq_no,
             comments=_cell(row, COL_COMMENTS),
-            issue_category=_cell(row, COL_ISSUE_CATEGORY),
+            issue_categories=_cell(row, COL_ISSUE_CATEGORIES),
             raw_url=raw_url,
+            date=_cell(row, COL_DATE),
+            candidate_name=_cell(row, COL_CANDIDATE_NAME),
+            ai_rating=_cell(row, COL_AI_RATING),
+            candidate_rating=_cell(row, COL_CANDIDATE_RATING),
+            annotator_name=_cell(row, COL_ANNOTATOR_NAME),
+            reviewed_by=_cell(row, COL_REVIEWED_BY),
+            week_num=_cell(row, COL_WEEK_NUM),
+            month=_cell(row, COL_MONTH),
+            screening_date=_cell(row, COL_SCREENING_DATE),
         ))
     return results
 

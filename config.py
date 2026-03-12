@@ -5,15 +5,24 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-# API
-XPLUS_API_BASE_URL = os.getenv("XPLUS_API_BASE_URL", "").rstrip("/")
-XPLUS_API_KEY = os.getenv("XPLUS_API_KEY", "")
-SPX_KB_API_BASE_URL = os.getenv("SPX_KB_API_BASE_URL", "").rstrip("/")
-SPX_API_KEY = os.getenv("SPX_API_KEY", "")
-SCREENING_API_BASE_URL = os.getenv("SCREENING_API_BASE_URL", "").rstrip("/")
-SCREENING_API_KEY = os.getenv("SCREENING_API_KEY", "")
+# Transcript API (conversational intelligence)
+TRANSCRIPT_API_BASE_URL = os.getenv(
+    "TRANSCRIPT_API_BASE_URL",
+    "http://mcs-campaign-execution-admin.prod.phenom.local",
+).rstrip("/")
 
-# LLM Judge
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-LLM_JUDGE_MODEL = os.getenv("LLM_JUDGE_MODEL", "gpt-4o-mini")
+# SPX get-document (knowledge base)
+SPX_TRANSFORMS_BASE_URL = os.getenv(
+    "SPX_TRANSFORMS_BASE_URL",
+    "http://spx-enterprise-search-transforms.prod.phenom.local",
+).rstrip("/")
+
+# SPX jobs (job details)
+SPX_JOBS_BASE_URL = os.getenv(
+    "SPX_JOBS_BASE_URL",
+    "http://spx-jobs-service.prod.phenom.local",
+).rstrip("/")
+
+# LLM Judge (Gemini)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_JUDGE_MODEL = os.getenv("GEMINI_JUDGE_MODEL", "gemini-1.5-flash")

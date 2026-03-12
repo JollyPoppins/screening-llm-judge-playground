@@ -1,6 +1,7 @@
 """
-Screening LLM Judge — Enterprise Evals (local).
-Run: streamlit run app.py (from project root)
+LLM Judge Parser Application — PRD implementation.
+Single-row selection, Fetch / Run / Fetch and Run, selective context checkboxes,
+tabular CSV view (A–M except D & G), expanded Comments and Issue Categories.
 """
 import sys
 from pathlib import Path
@@ -9,20 +10,44 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import tempfile
+import pandas as pd
 import streamlit as st
 from src.csv_processor import (
-    parse_row_numbers,
-    get_rows_from_csv,
+    load_csv,
+    get_single_row,
     RowInput,
+    COL_DATE,
+    COL_LINK,
+    COL_CANDIDATE_NAME,
+    COL_COMMENTS,
+    COL_AI_RATING,
+    COL_CANDIDATE_RATING,
+    COL_ISSUE_CATEGORIES,
+    COL_ANNOTATOR_NAME,
+    COL_REVIEWED_BY,
+    COL_WEEK_NUM,
+    COL_MONTH,
+    COL_TENANT,
+    COL_SCREENING_DATE,
 )
-from src.data_aggregation import assemble_all, AssembledRow
-from src.llm_judge import run_judge_for_all, JudgeResult
+from src.data_aggregation import assemble_row, AssembledRow
+from src.llm_judge import run_judge_one, JudgeResult, DEFAULT_JUDGE_TEMPLATE
+
+
+def _cell(row: pd.Series, col: int) -> str:
+    """Safe string from row at column index."""
+    if col >= len(row):
+        return ""
+    v = row.iloc[col]
+    return "" if pd.isna(v) else str(v).strip()
+
 
 # -----------------------------------------------------------------------------
-# Page config & enterprise styling
+# Page config
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Screening LLM Judge | Evals",
+    page_title="LLM Judge Parser Application",
     page_icon="⚖️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -32,173 +57,243 @@ st.markdown("""
 <style>
     .main { background-color: #f8fafc; }
     h1, h2, h3 { color: #0f172a; font-family: 'Segoe UI', system-ui, sans-serif; }
-    .panel {
-        background: #fff;
-        border: 1px solid #e2e8f0;
-        border-radius: 8px;
-        padding: 1rem 1.25rem;
-        margin-bottom: 1rem;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    }
-    .compare-row { display: flex; gap: 1rem; margin: 0.5rem 0; }
-    .compare-box {
-        flex: 1;
-        padding: 12px;
-        border-radius: 6px;
-        border: 1px solid #e2e8f0;
-        background: #f8fafc;
-    }
     .hitl-label { color: #0ea5e9; font-weight: 600; }
     .judge-label { color: #8b5cf6; font-weight: 600; }
-    div[data-testid="stExpander"] { border-radius: 8px; }
+    .section-box { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
 </style>
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
 # Session state
 # -----------------------------------------------------------------------------
-if "assembled_rows" not in st.session_state:
-    st.session_state.assembled_rows = []
-if "judge_results" not in st.session_state:
-    st.session_state.judge_results = []
-if "current_csv_path" not in st.session_state:
-    st.session_state.current_csv_path = None
+if "uploaded_csv" not in st.session_state:
+    st.session_state.uploaded_csv = None
+if "csv_path" not in st.session_state:
+    st.session_state.csv_path = None
+if "selected_row_number" not in st.session_state:
+    st.session_state.selected_row_number = None
+if "row_input" not in st.session_state:
+    st.session_state.row_input = None
+if "assembled" not in st.session_state:
+    st.session_state.assembled = None
+if "judge_result" not in st.session_state:
+    st.session_state.judge_result = None
+if "judge_prompt_template" not in st.session_state:
+    st.session_state.judge_prompt_template = DEFAULT_JUDGE_TEMPLATE
+if "include_transcript" not in st.session_state:
+    st.session_state.include_transcript = True
+if "include_kb" not in st.session_state:
+    st.session_state.include_kb = True
+if "include_jd" not in st.session_state:
+    st.session_state.include_jd = True
+if "include_audio" not in st.session_state:
+    st.session_state.include_audio = True
 
 # -----------------------------------------------------------------------------
-# Input panel (always visible)
+# 1. CSV Upload & Row Selection (single row)
 # -----------------------------------------------------------------------------
-st.title("⚖️ Screening LLM Judge")
-st.caption("Enterprise evals: fetch by call ID, run judge, compare with HITL.")
+st.title("⚖️ LLM Judge Parser Application")
 
-with st.expander("📥 Input Panel", expanded=True):
-    uploaded = st.file_uploader("Upload CSV", type=["csv"], key="csv_upload")
-    row_input = st.text_input(
-        "Row numbers to process (e.g. 5,6,12 or 5-8)",
-        placeholder="5,6,12",
-        key="row_numbers",
+with st.expander("📥 CSV Upload & Row Selection", expanded=True):
+    uploaded = st.file_uploader("Upload CSV file", type=["csv"], key="csv_upload")
+    if uploaded:
+        st.session_state.uploaded_csv = uploaded.getvalue()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+            tmp.write(st.session_state.uploaded_csv)
+            st.session_state.csv_path = Path(tmp.name)
+
+    row_number_input = st.number_input(
+        "Row number (select one record)",
+        min_value=1,
+        value=st.session_state.selected_row_number or 1,
+        step=1,
+        key="row_num_input",
     )
-    fetch_clicked = st.button("Fetch Data", type="primary", key="fetch_btn")
+    st.session_state.selected_row_number = row_number_input
 
-if fetch_clicked:
-    if not uploaded:
-        st.error("Please upload a CSV file first.")
-    elif not row_input.strip():
-        st.error("Please enter at least one row number.")
-    else:
-        rows = parse_row_numbers(row_input)
-        if not rows:
-            st.error("Could not parse row numbers. Use format like 5,6,12 or 5-8.")
+    # Validate row exists
+    row_exists = False
+    row_input: RowInput | None = st.session_state.row_input
+    if uploaded and st.session_state.csv_path:
+        row_input, err = get_single_row(st.session_state.csv_path, row_number_input)
+        if err:
+            st.error(err)
+            st.session_state.row_input = None
+            st.session_state.assembled = None
         else:
-            with st.spinner("Reading CSV and extracting call IDs..."):
-                import tempfile
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-                    tmp.write(uploaded.getvalue())
-                    tmp_path = Path(tmp.name)
-                try:
-                    row_inputs = get_rows_from_csv(tmp_path, rows)
-                finally:
-                    tmp_path.unlink(missing_ok=True)
-            if not row_inputs:
-                st.error("No valid rows found. Check that Column B contains URLs with callId=...")
-            else:
-                with st.spinner("Calling APIs (xPlus → SPX → Screening)..."):
-                    st.session_state.assembled_rows = assemble_all(row_inputs)
-                    st.session_state.judge_results = []
-                st.success(f"Fetched data for {len(st.session_state.assembled_rows)} row(s).")
-
-assembled_rows: list[AssembledRow] = st.session_state.assembled_rows
-judge_results: list[JudgeResult] = st.session_state.judge_results
+            row_exists = True
+            st.session_state.row_input = row_input
 
 # -----------------------------------------------------------------------------
-# Data display (modular, expandable)
+# 2. LLM Judge Prompt Section (editable)
 # -----------------------------------------------------------------------------
-if assembled_rows:
-    with st.expander("📄 Data Display — Transcript, Knowledge Base, Recording URL", expanded=True):
-        sel_idx = st.selectbox(
-            "Select row",
-            range(len(assembled_rows)),
-            format_func=lambda i: f"Row {assembled_rows[i].row_number} — {assembled_rows[i].call_id[:24]}...",
-            key="data_sel",
-        )
-        if sel_idx is not None:
-            r = assembled_rows[sel_idx]
-            if r.error:
-                st.warning(f"Error for this row: {r.error}")
-            st.subheader("Transcript")
-            st.text_area("", value=r.transcript or "(empty)", height=180, key="disp_transcript", disabled=True)
-            st.subheader("Knowledge Base")
-            st.text_area("", value=r.knowledge_base or "(empty)", height=120, key="disp_kb", disabled=True)
-            st.subheader("Recording URL")
-            if r.recording_url:
-                st.link_button("Open recording", r.recording_url, key="rec_link")
-            else:
-                st.text("(none)")
+st.subheader("LLM Judge Prompt")
+st.caption("Placeholders: {TS} = Transcript, {KB} = Knowledge Base, {JD} = Job Description. Data is inserted only when the corresponding checkbox is enabled.")
+prompt_template = st.text_area(
+    "Edit the prompt below",
+    value=st.session_state.judge_prompt_template,
+    height=200,
+    key="prompt_edit",
+)
+st.session_state.judge_prompt_template = prompt_template
 
-    # -------------------------------------------------------------------------
-    # Human Review (HITL) — expandable
-    # -------------------------------------------------------------------------
-    with st.expander("👤 Human Review (HITL) — Comments & Issue Category", expanded=True):
-        hitl_idx = st.selectbox(
-            "Select row",
-            range(len(assembled_rows)),
-            format_func=lambda i: f"Row {assembled_rows[i].row_number}",
-            key="hitl_sel",
-        )
-        if hitl_idx is not None:
-            r = assembled_rows[hitl_idx]
-            st.markdown("**Comments (Column D)**")
-            st.text_area("", value=r.hitl_comments or "(none)", height=100, key="hitl_comments", disabled=True)
-            st.markdown("**Issue Category (Column G)**")
-            st.text(r.hitl_issue_category or "(none)")
+# -----------------------------------------------------------------------------
+# 3. Action Controls: Fetch | Run | Fetch and Run
+# -----------------------------------------------------------------------------
+col_f, col_r, col_fr = st.columns(3)
+with col_f:
+    fetch_btn = st.button("Fetch", type="secondary", use_container_width=True)
+with col_r:
+    run_btn = st.button("Run", type="secondary", use_container_width=True)
+with col_fr:
+    fetch_run_btn = st.button("Fetch and Run", type="primary", use_container_width=True)
 
-    # -------------------------------------------------------------------------
-    # LLM Judge — Run & output
-    # -------------------------------------------------------------------------
-    with st.expander("🤖 LLM Judge — Run Judge & Output", expanded=True):
-        if st.button("Run Judge", type="primary", key="run_judge_btn"):
-            with st.spinner("Running LLM judge for all fetched rows..."):
-                st.session_state.judge_results = run_judge_for_all(assembled_rows)
-            st.rerun()
-        judge_results = st.session_state.judge_results
-        if judge_results:
-            j_sel = st.selectbox(
-                "Select row result",
-                range(len(judge_results)),
-                format_func=lambda i: f"Row {judge_results[i].row_number}",
-                key="judge_sel",
+if fetch_btn:
+    if not uploaded or not st.session_state.csv_path:
+        st.error("Please upload a CSV file first.")
+    elif not row_exists or not st.session_state.row_input:
+        st.error("Row does not exist.")
+    else:
+        with st.spinner("Fetching data (Transcript → KB → Job)..."):
+            st.session_state.assembled = assemble_row(st.session_state.row_input)
+        st.success("Fetch complete.")
+        st.rerun()
+
+if fetch_run_btn:
+    if not uploaded or not st.session_state.csv_path:
+        st.error("Please upload a CSV file first.")
+    elif not row_exists or not st.session_state.row_input:
+        st.error("Row does not exist.")
+    else:
+        with st.spinner("Fetching then running LLM judge..."):
+            st.session_state.assembled = assemble_row(st.session_state.row_input)
+            if st.session_state.assembled:
+                st.session_state.judge_result = run_judge_one(
+                    st.session_state.assembled,
+                    st.session_state.judge_prompt_template,
+                    include_transcript=st.session_state.include_transcript,
+                    include_kb=st.session_state.include_kb,
+                    include_jd=st.session_state.include_jd,
+                    include_audio=st.session_state.include_audio,
+                )
+        st.rerun()
+
+if run_btn:
+    if not st.session_state.assembled:
+        st.error("Fetch data first, then Run.")
+    else:
+        with st.spinner("Running LLM judge..."):
+            st.session_state.judge_result = run_judge_one(
+                st.session_state.assembled,
+                st.session_state.judge_prompt_template,
+                include_transcript=st.session_state.include_transcript,
+                include_kb=st.session_state.include_kb,
+                include_jd=st.session_state.include_jd,
+                include_audio=st.session_state.include_audio,
             )
-            if j_sel is not None:
-                j = judge_results[j_sel]
-                if j.error:
-                    st.error(j.error)
-                st.text_area("LLM output", value=j.raw_output or "(empty)", height=200, key="judge_out", disabled=True)
+        st.rerun()
 
-    # -------------------------------------------------------------------------
-    # Contrast: HITL vs LLM Judge (side-by-side)
-    # -------------------------------------------------------------------------
-    with st.expander("🔄 Compare — HITL vs LLM Judge", expanded=True):
-        st.caption("Compare human reviewer feedback with LLM judge output for the same row.")
-        c_sel = st.selectbox(
-            "Select row to compare",
-            range(len(assembled_rows)),
-            format_func=lambda i: f"Row {assembled_rows[i].row_number}",
-            key="compare_sel",
-        )
-        if c_sel is not None and c_sel < len(judge_results):
-            a = assembled_rows[c_sel]
-            j = judge_results[c_sel]
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown('<span class="hitl-label">HITL — Comments</span>', unsafe_allow_html=True)
-                st.text_area("", value=a.hitl_comments or "(none)", height=120, key="comp_hitl_c", disabled=True)
-                st.markdown('<span class="hitl-label">HITL — Issue Category</span>', unsafe_allow_html=True)
-                st.text(a.hitl_issue_category or "(none)")
-            with col2:
-                st.markdown('<span class="judge-label">LLM Judge — Output</span>', unsafe_allow_html=True)
-                st.text_area("", value=j.raw_output or "(empty)", height=120, key="comp_judge", disabled=True)
-                if j.error:
-                    st.error(j.error)
-        elif assembled_rows and not judge_results:
-            st.info("Run the judge first to see comparison.")
+assembled: AssembledRow | None = st.session_state.assembled
+judge_result: JudgeResult | None = st.session_state.judge_result
+
+# -----------------------------------------------------------------------------
+# 4. Data Retrieval Output Sections (after Fetch) + Selective checkboxes
+# -----------------------------------------------------------------------------
+if assembled:
+    st.subheader("Fetched Data (select what to send to LLM)")
+
+    # Checkboxes for selective context (PRD §8)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.session_state.include_transcript = st.checkbox("Include **Transcript** in judge", value=st.session_state.include_transcript, key="cb_ts")
+    with c2:
+        st.session_state.include_kb = st.checkbox("Include **Knowledge Base** in judge", value=st.session_state.include_kb, key="cb_kb")
+    with c3:
+        st.session_state.include_jd = st.checkbox("Include **Job Description** in judge", value=st.session_state.include_jd, key="cb_jd")
+    with c4:
+        st.session_state.include_audio = st.checkbox("Include **Audio** in judge", value=st.session_state.include_audio, key="cb_audio")
+
+    # Transcript Section
+    st.markdown("---")
+    st.markdown("**Transcript Section**")
+    if assembled.error:
+        st.warning(f"Fetch error: {assembled.error}")
+    st.text_area("", value=assembled.transcript or "(empty)", height=160, disabled=True, key="ta_transcript")
+
+    # Knowledge Base Section
+    st.markdown("**Knowledge Base Section**")
+    st.text_area("", value=assembled.knowledge_base or "(empty)", height=120, disabled=True, key="ta_kb")
+
+    # Job Description Section
+    st.markdown("**Job Description Section**")
+    st.text_area("", value=assembled.job_details_text or "(none)", height=80, disabled=True, key="ta_jd")
+
+    # Audio Player Section (embedded)
+    st.markdown("**Audio Player Section**")
+    if assembled.recording_url:
+        st.audio(assembled.recording_url, format="audio/ogg")
+        st.caption(f"Recording: {assembled.recording_url[:90]}...")
+    else:
+        st.text("(no recording URL)")
+
+# -----------------------------------------------------------------------------
+# 5. CSV Record Display: table A–M except D & G; expanded D and G
+# -----------------------------------------------------------------------------
+if row_input and st.session_state.csv_path:
+    st.subheader("CSV Record Display")
+    df = load_csv(st.session_state.csv_path)
+    idx = row_input.row_number - 1
+    if idx >= 0 and idx < len(df):
+        row = df.iloc[idx]
+        # Table: A, B, C, E, F, H, I, J, K, L, M (exclude D and G)
+        table_data = {
+            "Column": ["A – Date", "B – Link", "C – Candidate Name", "E – AI Rating", "F – Candidate Rating", "H – Annotator Name", "I – Reviewed By", "J – Week Number", "K – Month", "L – Tenant", "M – Screening Date"],
+            "Value": [
+                _cell(row, COL_DATE),
+                _cell(row, COL_LINK),
+                _cell(row, COL_CANDIDATE_NAME),
+                _cell(row, COL_AI_RATING),
+                _cell(row, COL_CANDIDATE_RATING),
+                _cell(row, COL_ANNOTATOR_NAME),
+                _cell(row, COL_REVIEWED_BY),
+                _cell(row, COL_WEEK_NUM),
+                _cell(row, COL_MONTH),
+                _cell(row, COL_TENANT),
+                _cell(row, COL_SCREENING_DATE),
+            ],
+        }
+        st.table(table_data)
+
+    st.markdown("**Comments (Column D)**")
+    st.text_area("", value=row_input.comments or "(none)", height=120, disabled=True, key="ta_comments")
+
+    st.markdown("**Issue Categories (Column G)**")
+    st.text(row_input.issue_categories or "(none)")
+
+# -----------------------------------------------------------------------------
+# 6. LLM Judge Output Section
+# -----------------------------------------------------------------------------
+st.subheader("LLM Judge Output")
+if judge_result:
+    if judge_result.error:
+        st.error(judge_result.error)
+    st.text_area("Result", value=judge_result.raw_output or "(empty)", height=220, disabled=True, key="ta_judge_out")
 else:
-    st.info("Upload a CSV, enter row numbers, and click **Fetch Data** to begin.")
+    st.info("Run or Fetch and Run to see the LLM judge result.")
+
+# -----------------------------------------------------------------------------
+# 7. Human vs LLM Comparison
+# -----------------------------------------------------------------------------
+st.subheader("Human vs LLM Comparison")
+if row_input and judge_result:
+    col_h, col_llm = st.columns(2)
+    with col_h:
+        st.markdown('<span class="hitl-label">Human — Comments (Column D)</span>', unsafe_allow_html=True)
+        st.text_area("", value=row_input.comments or "(none)", height=140, disabled=True, key="comp_comments")
+        st.markdown('<span class="hitl-label">Human — Issue Categories (Column G)</span>', unsafe_allow_html=True)
+        st.text(row_input.issue_categories or "(none)")
+    with col_llm:
+        st.markdown('<span class="judge-label">LLM Judge Output</span>', unsafe_allow_html=True)
+        st.text_area("", value=judge_result.raw_output or "(empty)", height=140, disabled=True, key="comp_llm")
+else:
+    st.caption("Select a row, Fetch, then Run to compare human annotations with LLM output.")

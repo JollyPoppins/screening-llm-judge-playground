@@ -1,39 +1,40 @@
-# Screening LLM Judge — Enterprise Evals
+# LLM Judge Parser Application
 
-Local application to run an LLM judge evaluation on screening calls: fetch data by call ID from two APIs, run a predefined judge prompt, and compare LLM output with human reviewer (HITL) data from a CSV.
+Local application per PRD: CSV upload, **single-row** selection, Fetch / Run / Fetch and Run, editable LLM judge prompt with placeholders `{TS}`, `{KB}`, `{JD}`, selective context checkboxes, and Human vs LLM comparison.
 
 ## Data source (CSV)
 
-- **Column B**: URL containing `callId` (query parameter). The app extracts the full value of `callId=` as the call ID.
-- **Column D**: Human reviewer comments (HITL).
-- **Column G**: Human issue category (HITL).
+Columns **A–M**: Date, Link, Candidate Name, Comments, AI Rating, Candidate Rating, **Issue Categories**, **Annotator Name**, Reviewed By, Week Number, Month, **Tenant**, Screening Date.
 
-You provide **row numbers** to process (e.g. `5,6,12` or `5-8`). For each selected row the app reads Column B, extracts the call ID, then fetches data from the APIs.
+- **B – Link**: URL with `callId`; the app extracts the full call ID from the query string.
+- **L – Tenant**: `refNum` used for transcript, KB, and job APIs.
+- **D – Comments** and **G – Issue Categories** are shown in expanded sections (not in the compact table).
 
-## API flow (placeholder until contract provided)
+You select **one row number** at a time. If the row does not exist or is invalid (missing callId/refNum), the app shows **"Row does not exist"**.
 
-1. **xPlus API** — input: `callId` → returns: `environment`, `refNumber`, `jobId`.
-2. **SPX API (KB)** — input: `jobId` → returns: knowledge base (job description / screening requirements).
-3. **Screening API** — input: `callId` → returns: `transcript`, `recordingUrl`.
+## API flow
 
-Data is assembled per row and injected into the LLM judge prompt placeholders (transcript + knowledge base).
+1. **Conversational Intelligence Transcript** — POST with `callId`, `refNum` → transcript + recording URL.
+2. **SPX get-document** — POST with `refNum` (CRM-SCREENING, getAgentKBDetails) → knowledge base.
+3. **SPX jobs service** — POST with `jobSeqNo` and `refNum` → job description (optional; add 14th column for Job Seq No if needed).
 
-## UI (modular panels)
+## Application structure (PRD)
 
-- **Input Panel**: Upload CSV, enter row numbers, **Fetch Data**.
-- **Data Display**: Transcript, Knowledge Base, Recording URL (expandable).
-- **Human Review (HITL)**: Comments (Column D), Issue Category (Column G) (expandable).
-- **LLM Judge**: **Run Judge** button, LLM output (expandable).
-- **Compare**: Side-by-side HITL vs LLM judge for the same row (expandable).
-
-All sections can be collapsed/expanded so the product manager can focus on comparison and main information.
+- **CSV Upload & Row Selection**: Upload CSV, enter a single row number. "Row does not exist" if invalid.
+- **LLM Judge Prompt**: Editable text area; placeholders `{TS}`, `{KB}`, `{JD}` replaced with fetched data when the corresponding checkbox is enabled.
+- **Actions**: **Fetch** (get data for selected row) | **Run** (run LLM judge with current prompt and checkboxes) | **Fetch and Run** (fetch then run).
+- **After Fetch**: Transcript, Knowledge Base, Job Description, and **Audio Player** (embedded) sections, each with a checkbox to **include in LLM judge**.
+- **CSV Record Display**: Table of columns A–M **except D and G**; then **Comments (Column D)** and **Issue Categories (Column G)** in separate sections.
+- **LLM Judge Output**: Dedicated result panel after Run.
+- **Human vs LLM Comparison**: LLM output vs human Comments and Issue Categories.
+- **Selective context**: Checkboxes for Transcript, Knowledge Base, Job Description, and Audio control what is sent to Gemini; data is inserted only if the prompt contains the relevant placeholder.
 
 ## Tech stack
 
 - **CSV processing**: `src/csv_processor.py`
-- **API clients**: `src/api_clients/` (xPlus, SPX, Screening)
+- **API clients**: `src/api_clients/` (transcript, KB get-document, jobs)
 - **Data aggregation**: `src/data_aggregation.py`
-- **LLM judge**: `src/llm_judge.py` (OpenAI-compatible API)
+- **LLM judge**: `src/llm_judge.py` (Google Gemini)
 - **Config**: `.env` (see `.env.example`); env vars for API endpoints and keys.
 
 ## Setup (local)
@@ -55,17 +56,13 @@ Open the URL shown in the terminal (e.g. http://localhost:8501).
 
 | Variable | Description |
 |----------|-------------|
-| `XPLUS_API_BASE_URL` | xPlus API base URL |
-| `XPLUS_API_KEY` | xPlus API key (if required) |
-| `SPX_KB_API_BASE_URL` | SPX KB API base URL |
-| `SPX_API_KEY` | SPX API key (if required) |
-| `SCREENING_API_BASE_URL` | Screening API base URL |
-| `SCREENING_API_KEY` | Screening API key (if required) |
-| `OPENAI_API_KEY` | LLM judge (OpenAI-compatible) |
-| `OPENAI_BASE_URL` | Optional; default `https://api.openai.com/v1` |
-| `LLM_JUDGE_MODEL` | Model name (e.g. `gpt-4o-mini`) |
+| `TRANSCRIPT_API_BASE_URL` | Transcript API (default: mcs-campaign-execution-admin.prod.phenom.local) |
+| `SPX_TRANSFORMS_BASE_URL` | SPX get-document (default: spx-enterprise-search-transforms.prod.phenom.local) |
+| `SPX_JOBS_BASE_URL` | SPX jobs service (default: spx-jobs-service.prod.phenom.local) |
+| `GEMINI_API_KEY` | Google Gemini API key (required for Run Judge) |
+| `GEMINI_JUDGE_MODEL` | Model name (default: `gemini-1.5-flash`) |
 
-If API URLs are not set, the app uses mock data so you can test the flow locally.
+Override base URLs in `.env` if your environment uses different hosts (e.g. for VPN or staging).
 
 ## Pushing to GitHub (new project)
 

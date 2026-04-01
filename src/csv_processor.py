@@ -63,6 +63,30 @@ def extract_call_id_from_url(url: str) -> Optional[str]:
     return match.group(1).strip() if match else None
 
 
+# UUID pattern (8-4-4-4-12 hex) for validating videoScreenId
+_UUID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def extract_video_screen_id_from_call_id(call_id: str) -> Optional[str]:
+    """
+    Extract the UUID portion before the _cid delimiter for JD_API_Needs (videoScreenId).
+    Example: d922ca89-c450-4a00-80b5-f17bea3c9186_cid_69b1b562... -> d922ca89-c450-4a00-80b5-f17bea3c9186
+    Returns None if call_id is invalid or the prefix is not a valid UUID.
+    """
+    if not call_id or not isinstance(call_id, str):
+        return None
+    raw = call_id.strip()
+    if "_cid" in raw:
+        prefix = raw.split("_cid", 1)[0].strip()
+    else:
+        prefix = raw
+    if not prefix or not _UUID_PATTERN.match(prefix):
+        return None
+    return prefix
+
+
 def parse_row_numbers(value: str) -> list[int]:
     """Parse '5,6,12' or '5-8' into list of 1-based row numbers."""
     if not value or not value.strip():

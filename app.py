@@ -3,6 +3,7 @@ LLM Judge Parser Application — PRD implementation.
 Single-row selection, Fetch / Run / Fetch and Run, selective context checkboxes,
 tabular CSV view (A–M except D & G), expanded Comments and Issue Categories.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -10,6 +11,23 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Load .env so GEMINI_API_KEY and API URLs are available
+# The app reads from .env. If .env doesn't exist, copy .env.example → .env so your key is used.
+from dotenv import load_dotenv
+_env_file = ROOT / ".env"
+_example_file = ROOT / ".env.example"
+if not _env_file.exists() and _example_file.exists():
+    _env_file.write_text(_example_file.read_text(), encoding="utf-8")
+load_dotenv(ROOT / ".env")
+load_dotenv(Path.cwd() / ".env")
+# Fallback: if key still missing (e.g. you edited only .env.example), load from .env.example
+if not (os.getenv("GEMINI_API_KEY") or "").strip():
+    load_dotenv(ROOT / ".env.example")
+    load_dotenv(Path.cwd() / ".env.example")
+
+import html
+import json
+import re
 import tempfile
 import pandas as pd
 import streamlit as st
@@ -32,7 +50,7 @@ from src.csv_processor import (
     COL_SCREENING_DATE,
 )
 from src.data_aggregation import assemble_row, AssembledRow
-from src.llm_judge import run_judge_one, JudgeResult, DEFAULT_JUDGE_TEMPLATE
+from src.llm_judge import run_judge_one, JudgeResult, DEFAULT_JUDGE_TEMPLATE, fetch_audio_bytes
 
 
 def _cell(row: pd.Series, col: int) -> str:
@@ -41,6 +59,97 @@ def _cell(row: pd.Series, col: int) -> str:
         return ""
     v = row.iloc[col]
     return "" if pd.isna(v) else str(v).strip()
+
+
+def _clean_judge_output_for_display(raw: str) -> str:
+    """Extract human-readable content from judge output, stripping JSON/code blocks."""
+    if not raw or not raw.strip():
+        return "(empty)"
+    text = raw.strip()
+    # Remove markdown code blocks (```json ... ``` or ``` ... ```)
+    text = re.sub(r"```(?:json)?\s*\n?(.*?)\n?```", r"\1", text, flags=re.DOTALL)
+    # Try to parse as JSON and pull out readable fields
+    try:
+        # Find first { ... } or [ ... ] that might be JSON
+        for pattern in [r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", r"\[.*\]"]:
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                obj = json.loads(match.group())
+                if isinstance(obj, dict):
+                    parts = []
+                    for key in ("comments", "summary", "assessment", "evaluation", "comment", "text", "output"):
+                        if key in obj and obj[key]:
+                            parts.append(str(obj[key]).strip())
+                    if obj.get("issueCategories") or obj.get("issues"):
+                        issues = obj.get("issueCategories") or obj.get("issues")
+                        if isinstance(issues, list):
+                            parts.append("Issue categories: " + ", ".join(str(i) for i in issues))
+                        elif isinstance(issues, str):
+                            parts.append("Issue categories: " + issues)
+                    if parts:
+                        return "\n\n".join(parts)
+                break
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # Fallback: strip extra newlines and return as-is (already readable)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _parse_llm_issue_categories(raw: str) -> list[tuple[str, str]]:
+    """Parse (category_label, severity) from judge output. Severity: low | medium | high."""
+    if not raw or not raw.strip():
+        return []
+    text = raw.strip()
+    out: list[tuple[str, str]] = []
+    # Try JSON first
+    try:
+        for match in re.finditer(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text):
+            try:
+                obj = json.loads(match.group())
+                if isinstance(obj, dict):
+                    issues = obj.get("issueCategories") or obj.get("issues") or []
+                    if isinstance(issues, list):
+                        for item in issues:
+                            if isinstance(item, dict):
+                                cat = (item.get("category") or item.get("name") or item.get("label") or "").strip()
+                                sev = (item.get("severity") or "medium").strip().lower()
+                                if sev not in ("low", "medium", "high"):
+                                    sev = "medium"
+                                if cat:
+                                    out.append((cat, sev))
+                            elif isinstance(item, str):
+                                # "Category (severity)" or just "Category"
+                                m = re.match(r"(.+?)\s*[(\[]\s*(low|medium|high)\s*[)\]]", item, re.I)
+                                if m:
+                                    out.append((m.group(1).strip(), m.group(2).lower()))
+                                else:
+                                    out.append((item.strip(), "medium"))
+                    break
+            except (json.JSONDecodeError, TypeError):
+                continue
+    except Exception:
+        pass
+    if out:
+        return out
+    # Heuristic: " - Category (high)" or "Issue: X. Severity: low" or "Category: X" with next line "Severity: high"
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        line = line.strip()
+        m = re.search(r"[-*]?\s*(.+?)\s*[(\[]\s*(low|medium|high)\s*[)\]]", line, re.I)
+        if m:
+            out.append((m.group(1).strip(), m.group(2).lower()))
+        else:
+            m2 = re.search(r"(?:issue|category)\s*:?\s*(.+?)(?:\s*[.;]|\s+severity)", line, re.I)
+            if m2:
+                cat = m2.group(1).strip()
+                sev = "medium"
+                # Check next line for "Severity: X"
+                if i + 1 < len(lines):
+                    next_m = re.search(r"severity\s*:?\s*(low|medium|high)", lines[i + 1], re.I)
+                    if next_m:
+                        sev = next_m.group(1).lower()
+                out.append((cat, sev))
+    return out
 
 
 # -----------------------------------------------------------------------------
@@ -60,6 +169,10 @@ st.markdown("""
     .hitl-label { color: #0ea5e9; font-weight: 600; }
     .judge-label { color: #8b5cf6; font-weight: 600; }
     .section-box { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    .severity-tag { display: inline-block; padding: 0.2em 0.6em; border-radius: 4px; font-size: 0.9em; font-weight: 500; margin: 0.15em 0.15em 0 0; }
+    .severity-low { background-color: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
+    .severity-medium { background-color: #fef9c3; color: #854d0e; border: 1px solid #fde047; }
+    .severity-high { background-color: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -76,6 +189,8 @@ if "row_input" not in st.session_state:
     st.session_state.row_input = None
 if "assembled" not in st.session_state:
     st.session_state.assembled = None
+if "assembled_row_number" not in st.session_state:
+    st.session_state.assembled_row_number = None  # row number that assembled data is for
 if "judge_result" not in st.session_state:
     st.session_state.judge_result = None
 if "judge_prompt_template" not in st.session_state:
@@ -110,6 +225,12 @@ with st.expander("📥 CSV Upload & Row Selection", expanded=True):
         key="row_num_input",
     )
     st.session_state.selected_row_number = row_number_input
+
+    # If user changed row number, clear assembled data so we don't show the previous row's data
+    if st.session_state.assembled_row_number is not None and st.session_state.assembled_row_number != row_number_input:
+        st.session_state.assembled = None
+        st.session_state.assembled_row_number = None
+        st.session_state.judge_result = None
 
     # Validate row exists
     row_exists = False
@@ -156,6 +277,7 @@ if fetch_btn:
     else:
         with st.spinner("Fetching data (Transcript → KB → Job)..."):
             st.session_state.assembled = assemble_row(st.session_state.row_input)
+            st.session_state.assembled_row_number = row_number_input
         st.success("Fetch complete.")
         st.rerun()
 
@@ -167,6 +289,7 @@ if fetch_run_btn:
     else:
         with st.spinner("Fetching then running LLM judge..."):
             st.session_state.assembled = assemble_row(st.session_state.row_input)
+            st.session_state.assembled_row_number = row_number_input
             if st.session_state.assembled:
                 st.session_state.judge_result = run_judge_one(
                     st.session_state.assembled,
@@ -193,8 +316,11 @@ if run_btn:
             )
         st.rerun()
 
-assembled: AssembledRow | None = st.session_state.assembled
-judge_result: JudgeResult | None = st.session_state.judge_result
+# Only show assembled data if it's for the currently selected row
+assembled: AssembledRow | None = None
+if st.session_state.assembled is not None and st.session_state.assembled_row_number == row_number_input:
+    assembled = st.session_state.assembled
+judge_result: JudgeResult | None = st.session_state.judge_result if assembled else None
 
 # -----------------------------------------------------------------------------
 # 4. Data Retrieval Output Sections (after Fetch) + Selective checkboxes
@@ -224,17 +350,28 @@ if assembled:
     st.markdown("**Knowledge Base Section**")
     st.text_area("", value=assembled.knowledge_base or "(empty)", height=120, disabled=True, key="ta_kb")
 
-    # Job Description Section
+    # Job Description Section (fetched via X+ → job API per PRD; no CSV column)
     st.markdown("**Job Description Section**")
-    st.text_area("", value=assembled.job_details_text or "(none)", height=80, disabled=True, key="ta_jd")
+    jd_text = assembled.job_details_text or ""
+    if not jd_text.strip():
+        st.text_area("", value="(none)", height=80, disabled=True, key="ta_jd")
+        st.caption("No job description. Fetched from X+ API (callId → jobId) then SPX job API. Configure XPLUS_API_BASE_URL if needed.")
+    else:
+        st.text_area("", value=jd_text, height=80, disabled=True, key="ta_jd")
 
-    # Audio Player Section (embedded)
+    # Audio Player Section: extract recording URL from transcript API, fetch audio file, display embedded (per PRD)
     st.markdown("**Audio Player Section**")
     if assembled.recording_url:
-        st.audio(assembled.recording_url, format="audio/ogg")
-        st.caption(f"Recording: {assembled.recording_url[:90]}...")
+        audio_bytes = fetch_audio_bytes(assembled.recording_url)
+        if audio_bytes:
+            st.audio(audio_bytes, format="audio/ogg")
+        else:
+            st.audio(assembled.recording_url, format="audio/ogg")
+        url_display = assembled.recording_url[:90] + "..." if len(assembled.recording_url) > 90 else assembled.recording_url
+        st.caption(f"Recording: {url_display}")
     else:
         st.text("(no recording URL)")
+        st.caption("Transcript API returns recording link (e.g. recordingLocation). Ensure the response is parsed correctly.")
 
 # -----------------------------------------------------------------------------
 # 5. CSV Record Display: table A–M except D & G; expanded D and G
@@ -294,6 +431,17 @@ if row_input and judge_result:
         st.text(row_input.issue_categories or "(none)")
     with col_llm:
         st.markdown('<span class="judge-label">LLM Judge Output</span>', unsafe_allow_html=True)
-        st.text_area("", value=judge_result.raw_output or "(empty)", height=140, disabled=True, key="comp_llm")
+        clean_output = _clean_judge_output_for_display(judge_result.raw_output or "")
+        st.text_area("", value=clean_output, height=140, disabled=True, key="comp_llm")
+        st.markdown('<span class="judge-label">LLM — Issue Categories</span>', unsafe_allow_html=True)
+        llm_issues = _parse_llm_issue_categories(judge_result.raw_output or "")
+        if llm_issues:
+            tags_html = " ".join(
+                f'<span class="severity-tag severity-{sev}">{html.escape(cat)}</span>'
+                for cat, sev in llm_issues
+            )
+            st.markdown(tags_html, unsafe_allow_html=True)
+        else:
+            st.caption("(no issue categories parsed from LLM output)")
 else:
     st.caption("Select a row, Fetch, then Run to compare human annotations with LLM output.")

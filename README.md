@@ -14,9 +14,10 @@ You select **one row number** at a time. If the row does not exist or is invalid
 
 ## API flow
 
-1. **Conversational Intelligence Transcript** — POST with `callId`, `refNum` → transcript + recording URL.
+1. **Conversational Intelligence Transcript** — POST with `callId`, `refNum` → transcript + recording URL (e.g. `recordingLocation`). The app fetches the audio file from that URL and displays it in an embedded audio player.
 2. **SPX get-document** — POST with `refNum` (CRM-SCREENING, getAgentKBDetails) → knowledge base.
-3. **SPX jobs service** — POST with `jobSeqNo` and `refNum` → job description (optional; add 14th column for Job Seq No if needed).
+3. **X+ API** — Call with `callId` → returns `jobId` / jobSeqNo (per PRD).
+4. **SPX jobs service** — POST with `jobSeqNo` (from X+) and `refNum` → job description. No CSV column required.
 
 ## Application structure (PRD)
 
@@ -40,7 +41,7 @@ You select **one row number** at a time. If the row does not exist or is invalid
 ## Setup (local)
 
 ```bash
-cd screening-llm-judge
+cd screening-llm-judge-playground
 python -m venv .venv
 .venv\Scripts\activate   # Windows
 # source .venv/bin/activate  # macOS/Linux
@@ -59,8 +60,10 @@ Open the URL shown in the terminal (e.g. http://localhost:8501).
 | `TRANSCRIPT_API_BASE_URL` | Transcript API (default: mcs-campaign-execution-admin.prod.phenom.local) |
 | `SPX_TRANSFORMS_BASE_URL` | SPX get-document (default: spx-enterprise-search-transforms.prod.phenom.local) |
 | `SPX_JOBS_BASE_URL` | SPX jobs service (default: spx-jobs-service.prod.phenom.local) |
+| `XPLUS_API_BASE_URL` | X+ API base URL (callId → jobId for job description; optional) |
+| `XPLUS_API_KEY` | X+ API key (optional) |
 | `GEMINI_API_KEY` | Google Gemini API key (required for Run Judge) |
-| `GEMINI_JUDGE_MODEL` | Model name (default: `gemini-1.5-flash`) |
+| `GEMINI_JUDGE_MODEL` | Model name (default: `gemini-2.5-flash`; use a [current model](https://ai.google.dev/gemini-api/docs/models) if you get 404) |
 
 Override base URLs in `.env` if your environment uses different hosts (e.g. for VPN or staging).
 
@@ -72,8 +75,8 @@ The project is already initialized with one commit. To push as a **new** GitHub 
 2. Locally, from the project folder:
 
 ```bash
-cd screening-llm-judge
-git remote add origin https://github.com/YOUR_USERNAME/screening-llm-judge.git
+cd screening-llm-judge-playground
+git remote add origin https://github.com/YOUR_USERNAME/screening-llm-judge-playground.git
 git branch -M main
 git push -u origin main
 ```

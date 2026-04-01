@@ -30,14 +30,28 @@ def fetch_transcript(call_id: str, ref_num: str) -> dict[str, Any]:
 
 
 def _extract_transcript_text(data: dict[str, Any]) -> str:
-    """Try common response shapes: transcript, segments, transcriptText, etc."""
+    """Try common response shapes: transcript, segments, transcriptText, etc.; also check nested data/result."""
     if not data:
         return ""
-    if isinstance(data.get("transcript"), str):
-        return data["transcript"]
-    if isinstance(data.get("transcriptText"), str):
-        return data["transcriptText"]
-    segments = data.get("segments") or data.get("transcriptSegments")
+    # Prefer nested payload if present (e.g. API returns { "data": { "transcript": "..." } })
+    for nest in ("data", "result", "response"):
+        nested = data.get(nest)
+        if isinstance(nested, dict):
+            out = _transcript_from_flat(nested)
+            if out:
+                return out
+    return _transcript_from_flat(data)
+
+
+def _transcript_from_flat(obj: dict[str, Any]) -> str:
+    """Extract transcript text from a flat dict."""
+    if not obj:
+        return ""
+    if isinstance(obj.get("transcript"), str):
+        return obj["transcript"]
+    if isinstance(obj.get("transcriptText"), str):
+        return obj["transcriptText"]
+    segments = obj.get("segments") or obj.get("transcriptSegments")
     if isinstance(segments, list):
         parts = []
         for seg in segments:
@@ -46,20 +60,28 @@ def _extract_transcript_text(data: dict[str, Any]) -> str:
             else:
                 parts.append(str(seg))
         return "\n".join(parts)
-    if isinstance(data.get("content"), str):
-        return data["content"]
-    return str(data)
+    if isinstance(obj.get("content"), str):
+        return obj["content"]
+    return str(obj) if obj else ""
 
 
 def _extract_recording_url(data: dict[str, Any]) -> str:
+    """Extract recording URL from top-level or nested response (e.g. data.recordingUrl, data.data.recordingUrl)."""
     if not data:
         return ""
-    return (
-        data.get("recordingUrl")
-        or data.get("recording_url")
-        or data.get("recordingLocation")
-        or ""
-    )
+    for key in ("recordingUrl", "recording_url", "recordingLocation", "recordingURL"):
+        val = data.get(key)
+        if val and isinstance(val, str) and val.strip():
+            return val.strip()
+    # Nested: data.data, data.result, data.response
+    for nest in ("data", "result", "response"):
+        nested = data.get(nest)
+        if isinstance(nested, dict):
+            for key in ("recordingUrl", "recording_url", "recordingLocation", "recordingURL"):
+                val = nested.get(key)
+                if val and isinstance(val, str) and val.strip():
+                    return val.strip()
+    return ""
 
 
 class TranscriptClient:

@@ -80,17 +80,18 @@ def run_judge(
     """
     try:
         import google.generativeai as genai
-        from config import GEMINI_API_KEY, GEMINI_JUDGE_MODEL
+        from config import get_gemini_api_key, GEMINI_JUDGE_MODEL
 
-        if not GEMINI_API_KEY:
+        api_key = get_gemini_api_key()
+        if not api_key:
             return JudgeResult(
                 row_number=assembled.row_number,
                 call_id=assembled.call_id,
                 raw_output="",
-                error="GEMINI_API_KEY not set. Add it to .env",
+                error="GEMINI_API_KEY not set. Add it to .env in the project folder and restart the app.",
             )
 
-        genai.configure(api_key=GEMINI_API_KEY)
+        genai.configure(api_key=api_key)
         model = genai.GenerativeModel(GEMINI_JUDGE_MODEL)
 
         prompt_text = fill_prompt(
@@ -108,13 +109,16 @@ def run_judge(
         if include_audio and assembled.recording_url:
             audio_bytes = fetch_audio_bytes(assembled.recording_url)
             if audio_bytes:
-                import google.generativeai as genai
-                audio_file = genai.upload_file(
-                    path=BytesIO(audio_bytes),
-                    mime_type="audio/ogg",
-                    display_name="screening_recording.ogg",
-                )
-                parts.append(audio_file)
+                try:
+                    audio_file = genai.upload_file(
+                        path=BytesIO(audio_bytes),
+                        mime_type="audio/ogg",
+                        display_name="screening_recording.ogg",
+                    )
+                    parts.append(audio_file)
+                except Exception:
+                    # If in-memory upload fails (e.g. SDK version), skip audio
+                    pass
 
         response = model.generate_content(parts)
         raw = (response.text or "").strip()

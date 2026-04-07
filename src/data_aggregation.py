@@ -76,6 +76,9 @@ def assemble_row(row_input: RowInput) -> AssembledRow:
     # 1. Transcript (and recording URL)
     try:
         transcript_resp = transcript_client.fetch(row_input.call_id, row_input.ref_num)
+        api_err = transcript_resp.get("error")
+        if api_err:
+            errors.append(f"Transcript: {api_err}")
         transcript = transcript_resp.get("transcript", "")
         if isinstance(transcript, list):
             transcript = "\n".join(str(s) for s in transcript)

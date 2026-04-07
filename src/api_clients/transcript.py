@@ -24,6 +24,13 @@ def fetch_transcript(call_id: str, ref_num: str) -> dict[str, Any]:
         "conversationalIntelligenceTranscript",
         json_body=body,
     )
+    # HTTP 200 with application-level failure (e.g. conversation missing in this env)
+    if isinstance(data, dict):
+        status = str(data.get("status") or "").lower()
+        err_msg = data.get("errorMsg") or data.get("message")
+        if status == "failure" or err_msg:
+            msg = (str(err_msg).strip() if err_msg else None) or "Transcript API returned an error"
+            return {"transcript": "", "recordingUrl": "", "error": msg}
     transcript_text = _extract_transcript_text(data)
     recording_url = _extract_recording_url(data)
     return {"transcript": transcript_text, "recordingUrl": recording_url}

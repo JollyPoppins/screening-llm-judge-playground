@@ -5,7 +5,6 @@ Must be called before the Job Description API to get required parameters.
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from config import JD_NEEDS_API_BASE_URL
 from src.api_clients.base import post
 
 
@@ -17,7 +16,7 @@ class JDNeedsResult:
     site_type: str
 
 
-def fetch_jd_needs(video_screen_id: str) -> JDNeedsResult:
+def fetch_jd_needs(video_screen_id: str, *, base_url: Optional[str] = None) -> JDNeedsResult:
     """
     Call getMongoDocument with videoScreenId; return jobSeqNo, locale, siteType.
     API returns Job ID which is the same as jobSeqNo.
@@ -26,7 +25,9 @@ def fetch_jd_needs(video_screen_id: str) -> JDNeedsResult:
         "query": {"videoScreenId": video_screen_id},
         "collectionName": "videoScreens",
     }
-    data = post(JD_NEEDS_API_BASE_URL, "getMongoDocument", json_body=body)
+    if not (base_url or "").strip():
+        raise ValueError("fetch_jd_needs requires base_url (caller must resolve region)")
+    data = post(base_url.strip().rstrip("/"), "getMongoDocument", json_body=body)
     return _parse_jd_needs_response(data)
 
 

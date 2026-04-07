@@ -8,7 +8,9 @@ from typing import Optional
 
 import requests
 
+from config import TRANSCRIPT_SELECTED_ENV
 from src.csv_processor import RowInput, extract_video_screen_id_from_call_id
+from src.region_routing import resolve_api_bases
 from src.api_clients import (
     transcript_client,
     kb_client,
@@ -31,6 +33,10 @@ class AssembledRow:
     hitl_comments: str
     hitl_issue_category: str
     error: Optional[str] = None
+    """Region bucket from Link ?selectedEnv= (e.g. produs, prodir); empty if .env defaults used."""
+    api_region_key: str = ""
+    """Transcript MCS base URL used for this fetch (for debugging)."""
+    transcript_base_url: str = ""
     # CSV display fields
     candidate_name: str = ""
     ai_rating: str = ""
@@ -73,9 +79,16 @@ def assemble_row(row_input: RowInput) -> AssembledRow:
     kb = ""
     job_details_text = ""
 
+    bases = resolve_api_bases(row_input.selected_env, TRANSCRIPT_SELECTED_ENV)
+
     # 1. Transcript (and recording URL)
     try:
-        transcript_resp = transcript_client.fetch(row_input.call_id, row_input.ref_num)
+        transcript_resp = transcript_client.fetch(
+            row_input.call_id,
+            row_input.ref_num,
+            selected_env=row_input.selected_env,
+            base_url=bases.transcript,
+        )
         api_err = transcript_resp.get("error")
         if api_err:
             errors.append(f"Transcript: {api_err}")
@@ -88,7 +101,7 @@ def assemble_row(row_input: RowInput) -> AssembledRow:
 
     # 2. Knowledge base (get-document; 404 is handled in kb_client and returns "")
     try:
-        kb = kb_client.fetch_kb(row_input.ref_num)
+        kb = kb_client.fetch_kb(row_input.ref_num, base_url=bases.spx_transforms)
         kb = (kb or "").strip()
     except Exception as e:
         errors.append(f"Knowledge base: {_user_friendly_fetch_error(e)}")
@@ -97,13 +110,14 @@ def assemble_row(row_input: RowInput) -> AssembledRow:
     video_screen_id = extract_video_screen_id_from_call_id(row_input.call_id)
     if video_screen_id:
         try:
-            jd_needs = fetch_jd_needs(video_screen_id)
+            jd_needs = fetch_jd_needs(video_screen_id, base_url=bases.jd_needs)
             if jd_needs.job_seq_no:
                 job_data = job_client.fetch(
                     jd_needs.job_seq_no,
                     row_input.ref_num,
                     locale=jd_needs.locale,
                     site_type=jd_needs.site_type,
+                    base_url=bases.spx_jobs,
                 )
                 job_details_text = job_details_to_text(job_data)
         except Exception:
@@ -120,6 +134,8 @@ def assemble_row(row_input: RowInput) -> AssembledRow:
         hitl_comments=row_input.comments,
         hitl_issue_category=row_input.issue_categories,
         error="; ".join(errors) if errors else None,
+        api_region_key=bases.region_key or "(.env defaults)",
+        transcript_base_url=bases.transcript,
         candidate_name=row_input.candidate_name,
         ai_rating=row_input.ai_rating,
         candidate_rating=row_input.candidate_rating,

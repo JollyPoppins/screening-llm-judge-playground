@@ -2,15 +2,14 @@
 SPX get-document API (knowledge base).
 POST with refNum → returns KB content for screening.
 """
-from typing import Any
+from typing import Any, Optional
 
 import requests
 
-from config import SPX_TRANSFORMS_BASE_URL
 from src.api_clients.base import post
 
 
-def fetch_knowledge_base(ref_num: str) -> str:
+def fetch_knowledge_base(ref_num: str, *, base_url: Optional[str] = None) -> str:
     """
     POST to get-document with CRM-SCREENING / getAgentKBDetails.
     Returns empty string on 404 (no document for this refNum) so the rest of the fetch can succeed.
@@ -23,7 +22,9 @@ def fetch_knowledge_base(ref_num: str) -> str:
         "ddoKey": "getAgentKBDetails",
     }
     try:
-        data = post(SPX_TRANSFORMS_BASE_URL, "get-document", json_body=body)
+        if not (base_url or "").strip():
+            raise ValueError("fetch_knowledge_base requires base_url (caller must resolve region)")
+        data = post(base_url.strip().rstrip("/"), "get-document", json_body=body)
         return _extract_kb_text(data)
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
@@ -52,8 +53,8 @@ def _extract_kb_text(data: Any) -> str:
 
 
 class KBClient:
-    def fetch_kb(self, ref_num: str) -> str:
-        return fetch_knowledge_base(ref_num)
+    def fetch_kb(self, ref_num: str, *, base_url: Optional[str] = None) -> str:
+        return fetch_knowledge_base(ref_num, base_url=base_url)
 
 
 kb_client = KBClient()

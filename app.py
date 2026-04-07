@@ -18,12 +18,12 @@ _env_file = ROOT / ".env"
 _example_file = ROOT / ".env.example"
 if not _env_file.exists() and _example_file.exists():
     _env_file.write_text(_example_file.read_text(), encoding="utf-8")
-load_dotenv(ROOT / ".env")
-load_dotenv(Path.cwd() / ".env")
+load_dotenv(ROOT / ".env", override=True)
+load_dotenv(Path.cwd() / ".env", override=True)
 # Fallback: if key still missing (e.g. you edited only .env.example), load from .env.example
 if not (os.getenv("GEMINI_API_KEY") or "").strip():
-    load_dotenv(ROOT / ".env.example")
-    load_dotenv(Path.cwd() / ".env.example")
+    load_dotenv(ROOT / ".env.example", override=True)
+    load_dotenv(Path.cwd() / ".env.example", override=True)
 
 import html
 import json
@@ -50,6 +50,8 @@ from src.csv_processor import (
     COL_TENANT,
     COL_SCREENING_DATE,
 )
+import config as app_config
+from src.region_routing import resolve_api_bases
 from src.data_aggregation import assemble_row, AssembledRow
 from src.llm_judge import run_judge_one, JudgeResult, DEFAULT_JUDGE_TEMPLATE, fetch_audio_bytes
 
@@ -246,6 +248,28 @@ with st.expander("📥 CSV Upload & Row Selection", expanded=True):
             row_exists = True
             st.session_state.row_input = row_input
 
+    if uploaded and st.session_state.csv_path and row_exists and row_input:
+        from_link = (row_input.selected_env or "").strip()
+        from_env = (app_config.TRANSCRIPT_SELECTED_ENV or "").strip()
+        effective_env = from_link or from_env
+        rb = resolve_api_bases(from_link, from_env)
+        with st.expander("Transcript request (IDs & hosts — use if debugging “conversation data not found”)", expanded=False):
+            st.markdown(
+                f"- **Region bucket:** `{rb.region_key or 'defaults from .env (no recognized selectedEnv)'}`\n"
+                f"- **Transcript MCS:** `{rb.transcript}`\n"
+                f"- **KB (SPX transforms):** `{rb.spx_transforms}`\n"
+                f"- **Jobs (SPX jobs):** `{rb.spx_jobs}`\n"
+                f"- **JD needs (getMongoDocument):** `{rb.jd_needs}`\n"
+                f"- **callId** (from Link): `{row_input.call_id}`\n"
+                f"- **refNum** (CSV column L): `{row_input.ref_num}`\n"
+                f"- **selectedEnv** (API body `common`): `{effective_env or '— not set — add ?selectedEnv= to Link or set TRANSCRIPT_SELECTED_ENV in .env'}`\n"
+            )
+            st.caption(
+                "Hosts are chosen from **selectedEnv** on the Link (prod US / prod IR / stg US / stg IR). "
+                "Override bad DNS with **PHENOM_REGION_OVERRIDES** in `.env` (JSON). "
+                "VPN required for `.phenom.local`."
+            )
+
 # -----------------------------------------------------------------------------
 # 2. LLM Judge Prompt Section (editable)
 # -----------------------------------------------------------------------------
@@ -328,6 +352,9 @@ judge_result: Optional[JudgeResult] = st.session_state.judge_result if assembled
 # -----------------------------------------------------------------------------
 if assembled:
     st.subheader("Fetched Data (select what to send to LLM)")
+    st.caption(
+        f"API region: **{assembled.api_region_key}** · Transcript host: `{assembled.transcript_base_url}`"
+    )
 
     # Checkboxes for selective context (PRD §8)
     c1, c2, c3, c4 = st.columns(4)
@@ -345,6 +372,15 @@ if assembled:
     st.markdown("**Transcript Section**")
     if assembled.error:
         st.warning(f"Fetch error: {assembled.error}")
+        if "conversation data not found" in assembled.error.lower():
+            st.info(
+                "**Fix transcript “not found” quickly:**\n"
+                "1. Confirm **VPN** is on and `.env` URLs match where the call lives (**prod** vs **stg**).\n"
+                "2. Add **`?selectedEnv=produs`** (or whatever the screening UI uses) to the Link, **or** set **`TRANSCRIPT_SELECTED_ENV`** in `.env`.\n"
+                "3. Confirm column **L (Tenant)** matches the **refNum** for that customer/stack.\n"
+                "4. Use a **fresh export** — old `callId` values may be purged.\n\n"
+                "Open **“Transcript request”** above to see the exact IDs sent to the server."
+            )
     st.text_area("", value=assembled.transcript or "(empty)", height=160, disabled=True, key="ta_transcript")
 
     # Knowledge Base Section

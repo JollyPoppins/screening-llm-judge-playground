@@ -128,11 +128,38 @@ def run_judge(
             raw_output=raw,
         )
     except Exception as e:
+        msg = str(e)
+        low = msg.lower()
+        if "403" in msg or "leaked" in low:
+            msg = (
+                f"{msg}\n\n"
+                "Google treats this key as **compromised** (often because it appeared in GitHub, a screenshot, "
+                "chat, or `.env.example`). **Create a new API key** in "
+                "[Google AI Studio](https://aistudio.google.com/apikey), put it only in **`.env`** as "
+                "`GEMINI_API_KEY=...`, restart the app, and **revoke** the old key in the Google Cloud console."
+            )
+        elif (
+            "api_key_invalid" in low
+            or ("400" in msg and "api key" in low)
+            or ("expired" in low and "api key" in low)
+        ):
+            msg = (
+                f"{msg}\n\n"
+                "Google often labels this **API_KEY_INVALID** even when the key is new. Check:\n"
+                "1. **Fully stop and restart** Streamlit (the app loads `.env` on startup; a running process keeps the old key).\n"
+                "2. **Shell override:** if you ever ran `export GEMINI_API_KEY=...`, your terminal may still send the old value. "
+                "Run `unset GEMINI_API_KEY` or start Streamlit from a fresh terminal. The project now forces `.env` to win over the shell.\n"
+                "3. **Google Cloud Console** → APIs & Services → Credentials → your key → **Application restrictions**: "
+                "use **None** for local Python (HTTP referrers / iOS/Android **block** server-side calls).\n"
+                "4. **API restrictions**: allow **Generative Language API** (or *Don't restrict* for testing).\n"
+                "5. Enable **Generative Language API** for the Google Cloud project that owns the key.\n"
+                "6. `.env` line must be exactly: `GEMINI_API_KEY=AIza...` (no spaces around `=`; quotes optional)."
+            )
         return JudgeResult(
             row_number=assembled.row_number,
             call_id=assembled.call_id,
             raw_output="",
-            error=str(e),
+            error=msg,
         )
 
 

@@ -6,6 +6,7 @@ Row numbers are 1-based (header = row 1).
 """
 import re
 from dataclasses import dataclass
+from urllib.parse import unquote
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +37,7 @@ class RowInput:
     row_number: int
     call_id: str
     ref_num: str
+    selected_env: str  # from Link ?selectedEnv=... or .env TRANSCRIPT_SELECTED_ENV
     job_seq_no: str
     comments: str
     issue_categories: str  # Column G, comma-separated
@@ -60,7 +62,20 @@ def extract_call_id_from_url(url: str) -> Optional[str]:
     if not url or not isinstance(url, str):
         return None
     match = re.search(r"[?&]callId=([^&\s]+)", url.strip())
-    return match.group(1).strip() if match else None
+    if not match:
+        return None
+    return unquote(match.group(1).strip())
+
+
+def extract_selected_env_from_url(url: str) -> str:
+    """
+    Screening insight links often include ?selectedEnv=produs (or prodin, stg, etc.).
+    The transcript service may need this inside the request body (common.selectedEnv).
+    """
+    if not url or not isinstance(url, str):
+        return ""
+    match = re.search(r"[?&]selectedEnv=([^&\s#]+)", url.strip(), re.IGNORECASE)
+    return unquote(match.group(1).strip()) if match else ""
 
 
 # UUID pattern (8-4-4-4-12 hex) for validating videoScreenId
@@ -133,10 +148,12 @@ def get_single_row(csv_path: Path, row_number: int) -> tuple[Optional[RowInput],
     if not call_id or not ref_num:
         return None, "Row does not exist"
     job_seq_no = _cell(row, COL_JOB_SEQ_NO) if len(row) > COL_JOB_SEQ_NO else ""
+    selected_env = extract_selected_env_from_url(raw_url)
     return RowInput(
         row_number=row_number,
         call_id=call_id,
         ref_num=ref_num,
+        selected_env=selected_env,
         job_seq_no=job_seq_no,
         comments=_cell(row, COL_COMMENTS),
         issue_categories=_cell(row, COL_ISSUE_CATEGORIES),
@@ -171,10 +188,12 @@ def get_rows_from_csv(csv_path: Path, row_numbers: list[int]) -> list[RowInput]:
         if not call_id or not ref_num:
             continue
         job_seq_no = _cell(row, COL_JOB_SEQ_NO) if COL_JOB_SEQ_NO < len(row) else ""  # no-op if COL_JOB_SEQ_NO >= 13
+        selected_env = extract_selected_env_from_url(raw_url)
         results.append(RowInput(
             row_number=rn,
             call_id=call_id,
             ref_num=ref_num,
+            selected_env=selected_env,
             job_seq_no=job_seq_no,
             comments=_cell(row, COL_COMMENTS),
             issue_categories=_cell(row, COL_ISSUE_CATEGORIES),

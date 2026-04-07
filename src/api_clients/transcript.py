@@ -2,25 +2,41 @@
 Conversational Intelligence Transcript API.
 POST with callId, refNum → returns transcript and optional recording URL.
 """
-from typing import Any
+from typing import Any, Optional
 
-from config import TRANSCRIPT_API_BASE_URL
+from config import TRANSCRIPT_SELECTED_ENV
 from src.api_clients.base import post
 
 
-def fetch_transcript(call_id: str, ref_num: str) -> dict[str, Any]:
+def fetch_transcript(
+    call_id: str,
+    ref_num: str,
+    selected_env: str = "",
+    *,
+    base_url: Optional[str] = None,
+) -> dict[str, Any]:
     """
     POST to conversationalIntelligenceTranscript.
-    Body: callId, refNum, childRefnums: [refNum], common: { refNum }
+    Body: callId, refNum, childRefnums: [refNum], common: { refNum, selectedEnv? }
     """
-    body = {
+    env_token = (selected_env or "").strip() or (TRANSCRIPT_SELECTED_ENV or "").strip()
+    common: dict[str, Any] = {"refNum": ref_num}
+    if env_token:
+        common["selectedEnv"] = env_token
+    body: dict[str, Any] = {
         "callId": call_id,
         "refNum": ref_num,
         "childRefnums": [ref_num],
-        "common": {"refNum": ref_num},
+        "common": common,
     }
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        from src.region_routing import resolve_api_bases
+
+        bases = resolve_api_bases(selected_env, TRANSCRIPT_SELECTED_ENV)
+        url = bases.transcript
     data = post(
-        TRANSCRIPT_API_BASE_URL,
+        url,
         "conversationalIntelligenceTranscript",
         json_body=body,
     )
@@ -92,8 +108,15 @@ def _extract_recording_url(data: dict[str, Any]) -> str:
 
 
 class TranscriptClient:
-    def fetch(self, call_id: str, ref_num: str) -> dict[str, Any]:
-        return fetch_transcript(call_id, ref_num)
+    def fetch(
+        self,
+        call_id: str,
+        ref_num: str,
+        selected_env: str = "",
+        *,
+        base_url: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return fetch_transcript(call_id, ref_num, selected_env=selected_env, base_url=base_url)
 
 
 transcript_client = TranscriptClient()

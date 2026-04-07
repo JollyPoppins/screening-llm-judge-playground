@@ -10,10 +10,13 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import os
 from dotenv import load_dotenv
 
-load_dotenv(ROOT / ".env")
-load_dotenv(ROOT / ".env.example")
+load_dotenv(ROOT / ".env", override=True)
+load_dotenv(Path.cwd() / ".env", override=True)
+if not (os.getenv("GEMINI_API_KEY") or "").strip():
+    load_dotenv(ROOT / ".env.example", override=True)
 
 import config as app_config
 
@@ -35,6 +38,7 @@ def main() -> int:
     # Values as the running app sees them (config.py defaults apply)
     resolved = [
         ("TRANSCRIPT_API_BASE_URL", app_config.TRANSCRIPT_API_BASE_URL, True, "Transcript API"),
+        ("TRANSCRIPT_SELECTED_ENV", app_config.TRANSCRIPT_SELECTED_ENV, False, "Transcript stack hint (e.g. produs)"),
         ("SPX_TRANSFORMS_BASE_URL", app_config.SPX_TRANSFORMS_BASE_URL, True, "Knowledge base (SPX)"),
         ("SPX_JOBS_BASE_URL", app_config.SPX_JOBS_BASE_URL, True, "Job details (SPX jobs)"),
         ("JD_NEEDS_API_BASE_URL", app_config.JD_NEEDS_API_BASE_URL, True, "JD needs (Mongo → job seq)"),

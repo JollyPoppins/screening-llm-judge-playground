@@ -2,9 +2,8 @@
 SPX jobs service API (job details).
 POST with jobSeqNo, refNum, locale, siteType (locale and siteType from JD_API_Needs).
 """
-from typing import Any
+from typing import Any, Optional
 
-from config import SPX_JOBS_BASE_URL
 from src.api_clients.base import post
 
 
@@ -13,6 +12,8 @@ def fetch_job_details(
     ref_num: str,
     locale: str = "en_us",
     site_type: str = "external",
+    *,
+    base_url: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     POST to service/v1/job with jobSeqNo and common (refNum, locale, siteType).
@@ -26,7 +27,9 @@ def fetch_job_details(
             "siteType": site_type,
         },
     }
-    return post(SPX_JOBS_BASE_URL, "service/v1/job", json_body=body)
+    if not (base_url or "").strip():
+        raise ValueError("fetch_job_details requires base_url (caller must resolve region)")
+    return post(base_url.strip().rstrip("/"), "service/v1/job", json_body=body)
 
 
 def job_details_to_text(data: dict[str, Any]) -> str:
@@ -50,8 +53,16 @@ class JobClient:
         ref_num: str,
         locale: str = "en_us",
         site_type: str = "external",
+        *,
+        base_url: Optional[str] = None,
     ) -> dict[str, Any]:
-        return fetch_job_details(job_seq_no, ref_num, locale=locale, site_type=site_type)
+        return fetch_job_details(
+            job_seq_no,
+            ref_num,
+            locale=locale,
+            site_type=site_type,
+            base_url=base_url,
+        )
 
 
 job_client = JobClient()

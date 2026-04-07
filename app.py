@@ -29,6 +29,7 @@ import html
 import json
 import re
 import tempfile
+from typing import Optional
 import pandas as pd
 import streamlit as st
 from src.csv_processor import (
@@ -234,7 +235,7 @@ with st.expander("📥 CSV Upload & Row Selection", expanded=True):
 
     # Validate row exists
     row_exists = False
-    row_input: RowInput | None = st.session_state.row_input
+    row_input: Optional[RowInput] = st.session_state.row_input
     if uploaded and st.session_state.csv_path:
         row_input, err = get_single_row(st.session_state.csv_path, row_number_input)
         if err:
@@ -317,10 +318,10 @@ if run_btn:
         st.rerun()
 
 # Only show assembled data if it's for the currently selected row
-assembled: AssembledRow | None = None
+assembled: Optional[AssembledRow] = None
 if st.session_state.assembled is not None and st.session_state.assembled_row_number == row_number_input:
     assembled = st.session_state.assembled
-judge_result: JudgeResult | None = st.session_state.judge_result if assembled else None
+judge_result: Optional[JudgeResult] = st.session_state.judge_result if assembled else None
 
 # -----------------------------------------------------------------------------
 # 4. Data Retrieval Output Sections (after Fetch) + Selective checkboxes

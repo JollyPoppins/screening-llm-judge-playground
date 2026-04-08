@@ -102,6 +102,23 @@ def extract_video_screen_id_from_call_id(call_id: str) -> Optional[str]:
     return prefix
 
 
+MAX_BATCH_ROW_COUNT = 5
+
+
+def parse_row_spec(value: str) -> tuple[list[int], Optional[str]]:
+    """
+    Parse row input: single number, comma list (12,34,45), or range (3-7).
+    Returns (sorted unique row numbers, None) or ([], error message).
+    """
+    nums = parse_row_numbers(value or "")
+    if not nums:
+        return [], "Enter at least one row number (e.g. 5, or 3-7, or 12,34,45)."
+    unique_sorted = sorted(set(nums))
+    if len(unique_sorted) > MAX_BATCH_ROW_COUNT:
+        return [], f"At most {MAX_BATCH_ROW_COUNT} rows at once (you have {len(unique_sorted)})."
+    return unique_sorted, None
+
+
 def parse_row_numbers(value: str) -> list[int]:
     """Parse '5,6,12' or '5-8' into list of 1-based row numbers."""
     if not value or not value.strip():
@@ -168,6 +185,19 @@ def get_single_row(csv_path: Path, row_number: int) -> tuple[Optional[RowInput],
         month=_cell(row, COL_MONTH),
         screening_date=_cell(row, COL_SCREENING_DATE),
     ), None
+
+
+def collect_batch_row_inputs(csv_path: Path, row_numbers: list[int]) -> tuple[list[RowInput], list[str]]:
+    """Resolve each row number; return valid RowInputs in same order as row_numbers, plus error strings."""
+    errors: list[str] = []
+    rows: list[RowInput] = []
+    for rn in row_numbers:
+        ri, err = get_single_row(csv_path, rn)
+        if err:
+            errors.append(f"Row {rn}: {err}")
+        else:
+            rows.append(ri)
+    return rows, errors
 
 
 def get_rows_from_csv(csv_path: Path, row_numbers: list[int]) -> list[RowInput]:

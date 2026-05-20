@@ -15,7 +15,10 @@ from dotenv import load_dotenv
 
 load_dotenv(ROOT / ".env", override=True)
 load_dotenv(Path.cwd() / ".env", override=True)
-if not (os.getenv("GEMINI_API_KEY") or "").strip():
+_has_gemini = (os.getenv("GEMINI_API_KEY") or "").strip() or (
+    (os.getenv("GEMINI_GATEWAY_BASE_URL") or "").strip()
+)
+if not _has_gemini:
     load_dotenv(ROOT / ".env.example", override=True)
 
 import config as app_config
@@ -44,7 +47,9 @@ def main() -> int:
         ("JD_NEEDS_API_BASE_URL", app_config.JD_NEEDS_API_BASE_URL, True, "JD needs (Mongo → job seq)"),
         ("XPLUS_API_BASE_URL", app_config.XPLUS_API_BASE_URL, False, "X+ (optional)"),
         ("XPLUS_API_KEY", app_config.XPLUS_API_KEY, False, "X+ key (optional)"),
-        ("GEMINI_API_KEY", app_config.GEMINI_API_KEY, False, "Gemini (needed for Run judge)"),
+        ("GEMINI_API_KEY", app_config.GEMINI_API_KEY, False, "Gemini Google key (Run judge if no gateway)"),
+        ("GEMINI_GATEWAY_BASE_URL", app_config.GEMINI_GATEWAY_BASE_URL, False, "Gemini internal gateway host"),
+        ("GEMINI_GATEWAY_API_KEY", app_config.GEMINI_GATEWAY_API_KEY, False, "Gemini gateway Bearer token"),
         ("GEMINI_JUDGE_MODEL", app_config.GEMINI_JUDGE_MODEL, True, "Gemini model"),
     ]
 
@@ -73,10 +78,15 @@ def main() -> int:
         print("Python packages: streamlit, pandas, requests, google-generativeai — OK")
 
     print()
-    if ok and (app_config.GEMINI_API_KEY or "").strip():
-        print("Ready for Fetch (internal APIs). Ready for Run if Gemini key is valid.")
+    if ok and app_config.gemini_gateway_configured():
+        print("Ready for Fetch (internal APIs). Run judge uses GEMINI_GATEWAY_* (internal gateway).")
+    elif ok and (app_config.GEMINI_API_KEY or "").strip():
+        print("Ready for Fetch (internal APIs). Ready for Run if Gemini Google key is valid.")
     elif ok:
-        print("Ready for Fetch (internal APIs). Add GEMINI_API_KEY to .env for Run.")
+        print(
+            "Ready for Fetch (internal APIs). For Run: set GEMINI_GATEWAY_BASE_URL + GEMINI_GATEWAY_API_KEY "
+            "or GEMINI_API_KEY."
+        )
     else:
         print("Fix items marked [!!] above, then run again.")
     return 0 if ok else 1

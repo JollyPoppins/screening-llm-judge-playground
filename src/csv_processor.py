@@ -102,7 +102,7 @@ def extract_video_screen_id_from_call_id(call_id: str) -> Optional[str]:
     return prefix
 
 
-MAX_BATCH_ROW_COUNT = 5
+MAX_BATCH_ROW_COUNT = 10
 
 
 def parse_row_spec(value: str) -> tuple[list[int], Optional[str]]:

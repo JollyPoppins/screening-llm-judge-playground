@@ -26,7 +26,10 @@ if not _env_file.exists() and _example_file.exists():
     _env_file.write_text(_example_file.read_text(), encoding="utf-8")
 load_dotenv(ROOT / ".env", override=True)
 load_dotenv(Path.cwd() / ".env", override=True)
-if not (os.getenv("GEMINI_API_KEY") or "").strip():
+_has_gemini = (os.getenv("GEMINI_API_KEY") or "").strip() or (
+    (os.getenv("GEMINI_GATEWAY_BASE_URL") or "").strip()
+)
+if not _has_gemini:
     load_dotenv(ROOT / ".env.example", override=True)
     load_dotenv(Path.cwd() / ".env.example", override=True)
 
@@ -75,39 +78,123 @@ def _cell_raw_no_strip(row: pd.Series, col: int) -> str:
     return "" if pd.isna(v) else str(v)
 
 
-def _clean_judge_output_for_display(raw: str) -> str:
-    if not raw or not raw.strip():
-        return "(empty)"
-    text = raw.strip()
-    text = re.sub(r"```(?:json)?\s*\n?(.*?)\n?```", r"\1", text, flags=re.DOTALL)
+def _parse_judge_output_dict(raw: str) -> Optional[dict]:
+    """Best-effort parse top-level JSON object from LLM output (handles fenced blocks)."""
+    if not raw or not str(raw).strip():
+        return None
+    text = str(raw).strip()
+    m = re.match(r"^```(?:json)?\s*\n?(.*)\n?```\s*$", text, re.DOTALL | re.I)
+    if m:
+        text = m.group(1).strip()
     try:
-        for pattern in [r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", r"\[.*\]"]:
-            match = re.search(pattern, text, re.DOTALL)
-            if match:
-                obj = json.loads(match.group())
-                if isinstance(obj, dict):
-                    parts = []
-                    for key in ("comments", "summary", "assessment", "evaluation", "comment", "text", "output"):
-                        if key in obj and obj[key]:
-                            parts.append(str(obj[key]).strip())
-                    if obj.get("issueCategories") or obj.get("issues"):
-                        issues = obj.get("issueCategories") or obj.get("issues")
-                        if isinstance(issues, list):
-                            parts.append("Issue categories: " + ", ".join(str(i) for i in issues))
-                        elif isinstance(issues, str):
-                            parts.append("Issue categories: " + issues)
-                    if parts:
-                        return "\n\n".join(parts)
-                break
-    except (json.JSONDecodeError, TypeError):
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
         pass
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            obj = json.loads(text[start : end + 1])
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _issues_list_from_obj(obj: dict) -> list[dict]:
+    issues = obj.get("issues")
+    if not isinstance(issues, list):
+        return []
+    return [x for x in issues if isinstance(x, dict)]
+
+
+def _hitl_listings_display(raw: str) -> str:
+    """One line per entry from HITL_equivalent_issue_listings (array of strings); model text often already numbered."""
+    obj = _parse_judge_output_dict(raw)
+    if not obj:
+        return "(could not parse JSON — no HITL_equivalent_issue_listings)"
+    lst = obj.get("HITL_equivalent_issue_listings")
+    if lst is None:
+        return "(no HITL_equivalent_issue_listings in JSON)"
+    if not isinstance(lst, list):
+        return "(HITL_equivalent_issue_listings is not an array)"
+    if not lst:
+        return "(empty list)"
+    lines = [str(item).strip() for item in lst if str(item).strip()]
+    return "\n".join(lines) if lines else "(empty list)"
+
+
+def _category_severity_from_issues(issues: list[dict]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for item in issues:
+        cat = (item.get("category") or item.get("name") or item.get("label") or "").strip()
+        if not cat:
+            continue
+        sev = (item.get("severity") or "medium").strip().lower()
+        if sev not in ("low", "medium", "high"):
+            sev = "medium"
+        out.append((cat, sev))
+    return out
+
+
+def _pretty_issue_type_tag_label(raw: str) -> str:
+    """Underscores → spaces, strip stray ×n suffixes, sentence case (first letter only)."""
+    s = (raw or "").replace("_", " ").strip()
+    s = re.sub(r"\s*[×x]\s*\d+\s*$", "", s, flags=re.I).strip()
+    if not s:
+        return ""
+    return s[:1].upper() + s[1:].lower()
+
+
+def _issue_type_tag_pairs_from_issues(issues: list[dict]) -> list[tuple[str, str]]:
+    """(display label, severity) from issue_type_tag."""
+    out: list[tuple[str, str]] = []
+    for item in issues:
+        tag = (item.get("issue_type_tag") or "").strip()
+        if not tag:
+            continue
+        display = _pretty_issue_type_tag_label(tag)
+        if not display:
+            continue
+        sev = (item.get("severity") or "medium").strip().lower()
+        if sev not in ("low", "medium", "high"):
+            sev = "medium"
+        out.append((display, sev))
+    return out
 
 
 def _parse_llm_issue_categories(raw: str) -> list[tuple[str, str]]:
-    if not raw or not raw.strip():
+    """(category label, severity) for badges under full output and Excel."""
+    if not raw or not str(raw).strip():
         return []
-    text = raw.strip()
+    obj = _parse_judge_output_dict(raw)
+    if obj:
+        pairs = _category_severity_from_issues(_issues_list_from_obj(obj))
+        if pairs:
+            return pairs
+        ic = obj.get("issueCategories")
+        if isinstance(ic, list):
+            ic_out: list[tuple[str, str]] = []
+            for item in ic:
+                if isinstance(item, str):
+                    m = re.match(r"(.+?)\s*[(\[]\s*(low|medium|high)\s*[)\]]", item, re.I)
+                    if m:
+                        ic_out.append((m.group(1).strip(), m.group(2).lower()))
+                    else:
+                        ic_out.append((item.strip(), "medium"))
+                elif isinstance(item, dict):
+                    cat = (item.get("category") or item.get("name") or item.get("label") or "").strip()
+                    if cat:
+                        sev = (item.get("severity") or "medium").strip().lower()
+                        if sev not in ("low", "medium", "high"):
+                            sev = "medium"
+                        ic_out.append((cat, sev))
+            if ic_out:
+                return ic_out
+    text = str(raw).strip()
     out: list[tuple[str, str]] = []
     try:
         for match in re.finditer(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text):
@@ -154,6 +241,16 @@ def _parse_llm_issue_categories(raw: str) -> list[tuple[str, str]]:
                         sev = next_m.group(1).lower()
                 out.append((cat, sev))
     return out
+
+
+def _parse_llm_issue_type_tags(raw: str) -> list[tuple[str, str]]:
+    """(issue_type_tag display label, severity) from structured issues[]."""
+    if not raw or not str(raw).strip():
+        return []
+    obj = _parse_judge_output_dict(raw)
+    if not obj:
+        return []
+    return _issue_type_tag_pairs_from_issues(_issues_list_from_obj(obj))
 
 
 def _on_use_default_prompt_change() -> None:
@@ -229,54 +326,80 @@ def _render_csv_record_table(row: pd.Series, row_input: RowInput) -> None:
     st.markdown(table, unsafe_allow_html=True)
 
 
-def _render_llm_issue_tags(raw_output: str) -> None:
-    llm_issues = _parse_llm_issue_categories(raw_output or "")
-    if not llm_issues:
-        st.caption("(no issue categories parsed from LLM output)")
+def _render_llm_severity_badge_row(pairs: list[tuple[str, str]], *, empty_caption: str) -> None:
+    """Severity-colored pills with ×n when (label, severity) repeats."""
+    if not pairs:
+        st.caption(empty_caption)
         return
-    clubbed = club_llm_issue_categories(llm_issues)
-    parts = []
-    for cat, sev, n in clubbed:
+    clubbed = club_llm_issue_categories(pairs)
+    parts: list[str] = []
+    for label, sev, n in clubbed:
         safe_sev = sev if sev in ("low", "medium", "high") else "medium"
         count_badge = f' <span class="llm-count-badge">×{n}</span>' if n > 1 else ""
         parts.append(
-            f'<span class="severity-tag severity-{safe_sev}">{html.escape(cat)}{count_badge}</span>'
+            f'<span class="severity-tag severity-{safe_sev}">{html.escape(label)}{count_badge}</span>'
         )
     st.markdown(" ".join(parts), unsafe_allow_html=True)
 
 
-def _llm_categories_plain_text(raw_output: str) -> str:
-    pairs = _parse_llm_issue_categories(raw_output or "")
+def _llm_issue_type_tags_csv(raw_output: str) -> str:
+    """Unique issue type tags only (no × counts), title case, comma-separated."""
+    pairs = _parse_llm_issue_type_tags(raw_output or "")
     if not pairs:
         return ""
-    clubbed = club_llm_issue_categories(pairs)
-    parts: list[str] = []
-    for cat, sev, n in clubbed:
-        s = f"{cat} ({sev})"
-        if n > 1:
-            s += f" ×{n}"
-        parts.append(s)
-    return "; ".join(parts)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for label, _ in pairs:
+        key = label.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(label)
+    return ", ".join(ordered)
 
 
-def _excel_two_cell_line(comment: str, categories: str) -> str:
-    """Single line with tab so Excel pastes into two columns."""
+def _quote_tsv_field_for_excel(s: str) -> str:
+    """Quote so Excel pastes one cell; unquoted newlines would become new rows."""
+    if "\n" in s or "\r" in s or '"' in s:
+        s = s.replace("\r\n", "\n").replace("\r", "\n")
+        return '"' + s.replace('"', '""') + '"'
+    return s
 
-    def flatten(s: str) -> str:
-        return " ".join((s or "").replace("\t", " ").split())
 
-    return flatten(comment) + "\t" + flatten(categories)
+def _excel_clipboard_hitl_and_tags(llm_output_multiline: str, issue_tags_csv: str) -> str:
+    """Tab-separated row: left cell may be multiline (quoted); right is comma-separated tags."""
+    left = (llm_output_multiline or "").replace("\t", " ")
+    left = left.replace("\r\n", "\n").replace("\r", "\n")
+    right = (issue_tags_csv or "").replace("\t", " ").replace("\n", " ")
+    right = " ".join(right.split())
+    return _quote_tsv_field_for_excel(left) + "\t" + _quote_tsv_field_for_excel(right)
 
 
-def _render_excel_copy_button(comment: str, categories: str, uid: str) -> None:
+def _render_copy_to_excel_button(llm_output_multiline: str, issue_tags_csv: str, uid: str) -> None:
+    """Copy LLM output + issue type tags as two Excel columns (tab-separated)."""
     safe_id = re.sub(r"[^a-zA-Z0-9_]", "_", uid)[:72]
-    payload = _excel_two_cell_line(comment, categories)
+    payload = _excel_clipboard_hitl_and_tags(llm_output_multiline, issue_tags_csv)
     b64 = base64.b64encode(payload.encode("utf-8")).decode("ascii")
     b64_js = json.dumps(b64)
     html_snip = f"""
-<div>
-  <button type="button" id="cp_{safe_id}" style="padding:0.2rem 0.65rem;font-size:0.85rem;cursor:pointer;border-radius:6px;border:1px solid #94a3b8;background:#f8fafc;">Copy for Excel</button>
-  <span id="cpm_{safe_id}" style="margin-left:6px;font-size:0.75rem;color:#64748b;"></span>
+<div style="display:flex;align-items:center;justify-content:flex-end;gap:10px;font-family:system-ui,-apple-system,sans-serif;">
+  <button type="button" id="cp_{safe_id}" style="
+    appearance:none;
+    -webkit-appearance:none;
+    font:inherit;
+    font-size:0.8125rem;
+    font-weight:600;
+    letter-spacing:0.01em;
+    padding:0.5rem 1rem;
+    border:none;
+    border-radius:10px;
+    color:#fafafa;
+    background:linear-gradient(165deg,#8b5cf6 0%,#6d28d9 55%,#5b21b6 100%);
+    box-shadow:0 1px 2px rgba(15,23,42,0.08),0 4px 12px rgba(109,40,217,0.35);
+    cursor:pointer;
+    transition:transform 0.12s ease,box-shadow 0.12s ease,filter 0.12s ease;
+  " onmouseover="this.style.filter='brightness(1.06)'" onmouseout="this.style.filter='none'">Copy to Excel</button>
+  <span id="cpm_{safe_id}" style="font-size:0.75rem;color:#64748b;min-width:3.5rem;"></span>
 </div>
 <script>
 (function() {{
@@ -299,7 +422,7 @@ def _render_excel_copy_button(comment: str, categories: str, uid: str) -> None:
 }})();
 </script>
 """
-    components.html(html_snip, height=48)
+    components.html(html_snip, height=52)
 
 
 def _render_one_row_block(
@@ -402,18 +525,20 @@ def _render_one_row_block(
         )
 
         st.markdown("---")
-        h_llm, h_copy = st.columns([5, 1])
-        with h_llm:
-            st.markdown("**LLM judge output**")
-        with h_copy:
-            if judge_result and not judge_result.error:
-                clean_for_copy = _clean_judge_output_for_display(judge_result.raw_output or "")
-                cats_plain = _llm_categories_plain_text(judge_result.raw_output or "")
-                _render_excel_copy_button(clean_for_copy, cats_plain, f"main_{suffix}")
+        st.markdown("**LLM judge output**")
 
         if judge_result:
             if judge_result.error:
                 st.error(judge_result.error)
+            else:
+                st.markdown(
+                    '<span class="judge-label">LLM — Issue categories</span>',
+                    unsafe_allow_html=True,
+                )
+                _render_llm_severity_badge_row(
+                    _parse_llm_issue_categories(judge_result.raw_output or ""),
+                    empty_caption="(no issue categories parsed from LLM output)",
+                )
             st.text_area(
                 f"Judge output row {rn}",
                 value=judge_result.raw_output or "(empty)",
@@ -448,24 +573,72 @@ def _render_one_row_block(
         with llm_h1:
             st.markdown('<span class="judge-label">LLM output</span>', unsafe_allow_html=True)
         with llm_h2:
-            if compact and judge_result and not judge_result.error:
-                clean_for_copy = _clean_judge_output_for_display(judge_result.raw_output or "")
-                cats_plain = _llm_categories_plain_text(judge_result.raw_output or "")
-                _render_excel_copy_button(clean_for_copy, cats_plain, f"cmp_{suffix}")
+            if judge_result and not judge_result.error:
+                _raw = judge_result.raw_output or ""
+                _render_copy_to_excel_button(
+                    _hitl_listings_display(_raw),
+                    _llm_issue_type_tags_csv(_raw),
+                    f"llm_out_{suffix}",
+                )
         if judge_result:
-            clean_output = _clean_judge_output_for_display(judge_result.raw_output or "")
+            if judge_result.error:
+                llm_side_text = judge_result.raw_output or "(empty)"
+            else:
+                llm_side_text = _hitl_listings_display(judge_result.raw_output or "")
             st.text_area(
                 f"LLM text row {rn}",
-                value=clean_output,
+                value=llm_side_text,
                 height=140,
                 key=f"ta_llm_{suffix}",
             )
-            st.markdown('<span class="judge-label">LLM — Issue categories</span>', unsafe_allow_html=True)
-            _render_llm_issue_tags(judge_result.raw_output or "")
+            st.markdown(
+                '<span class="judge-label">LLM — Issue type tags</span>',
+                unsafe_allow_html=True,
+            )
+            _render_llm_severity_badge_row(
+                _parse_llm_issue_type_tags(judge_result.raw_output or ""),
+                empty_caption="(no issue type tags parsed from LLM output)",
+            )
         else:
             st.caption("No LLM result yet for this row.")
 
     st.markdown("---")
+
+
+def _judge_progress_html() -> Optional[str]:
+    """HTML body (no outer wrapper) while incremental Run / Fetch+Run is in progress."""
+    if st.session_state.get("_run_judge_active"):
+        idx = int(st.session_state.get("_run_judge_idx", 0))
+        items = st.session_state.get("batch_items") or []
+        if items and idx < len(items):
+            rn = items[idx]["row_number"]
+            return (
+                f"<strong>Running LLM judge</strong> — CSV row <strong>{html.escape(str(rn))}</strong> "
+                f"({idx + 1} of {len(items)}). Each row appears below as soon as it finishes."
+            )
+    if st.session_state.get("_fr_active"):
+        nums_fr = st.session_state.get("_fr_row_numbers") or []
+        idx = int(st.session_state.get("_fr_idx", 0))
+        if nums_fr and idx < len(nums_fr):
+            rn = nums_fr[idx]
+            return (
+                f"<strong>Fetch and run</strong> — CSV row <strong>{html.escape(str(rn))}</strong> "
+                f"({idx + 1} of {len(nums_fr)}). Each row appears below as soon as it finishes."
+            )
+    return None
+
+
+def _render_judge_progress_banner(inner_html: str) -> None:
+    """Rotating loader + status (uses global @keyframes judge-spin)."""
+    st.markdown(
+        '<div style="display:flex;align-items:flex-start;gap:0.65rem;padding:0.75rem 1rem;'
+        "background:#e0f2fe;border-radius:0.5rem;border:1px solid #7dd3fc;color:#0c4a6e;\">"
+        '<div aria-hidden="true" title="Loading" style="margin-top:2px;min-width:1.15rem;height:1.15rem;'
+        "border-radius:50%;border:2.5px solid #bae6fd;border-top-color:#0284c7;"
+        "animation:judge-spin 0.75s linear infinite;flex-shrink:0;\"></div>"
+        f'<div style="flex:1;line-height:1.45;">{inner_html}</div></div>',
+        unsafe_allow_html=True,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -497,6 +670,7 @@ st.markdown("""
     .csv-mini-table .csv-val { font-size: 0.8rem; color: #0f172a; line-height: 1.35; }
     .csv-mini-table .csv-val-d-pre { white-space: pre; display: block; overflow-x: auto; max-height: 50vh; font-family: ui-monospace, monospace; font-size: 0.78rem; }
     .csv-mini-table a { color: #2563eb; text-decoration: underline; word-break: break-all; }
+    @keyframes judge-spin { to { transform: rotate(360deg); } }
 </style>
 """, unsafe_allow_html=True)
 
@@ -525,7 +699,7 @@ with hdr_l:
 with hdr_r:
     st.toggle(
         "Compact row view",
-        help="Hide transcript, KB, JD, audio, CSV table, issue tags, and the main LLM output block. Human vs LLM stays visible (with Copy in compact mode).",
+        help="Hide transcript, KB, JD, audio, CSV table, issue tags, and the main LLM judge output block. Human vs LLM stays visible (Copy to Excel stays beside LLM output).",
         key="compact_row_view",
     )
 
@@ -558,7 +732,7 @@ with st.expander("📥 CSV upload & row selection", expanded=True):
 
     st.text_input(
         "Row number(s)",
-        help="One number, comma-separated (e.g. 12,34,45), or a range (e.g. 3-7). Up to 5 rows.",
+        help="One number, comma-separated (e.g. 12,34,45), or a range (e.g. 3-7). Up to 10 rows.",
         key="row_spec_input",
     )
 
@@ -622,6 +796,10 @@ if fetch_btn:
         if not rows:
             st.error("No valid rows to fetch.")
         else:
+            st.session_state._run_judge_active = False
+            st.session_state._fr_active = False
+            st.session_state._fr_row_numbers = None
+            st.session_state._fr_idx = 0
             items: list[dict[str, Any]] = []
             for ri in rows:
                 with st.spinner(f"Fetching row {ri.row_number}…"):
@@ -651,31 +829,12 @@ if fetch_run_btn:
         if not rows:
             st.error("No valid rows to fetch.")
         else:
-            items = []
-            prompt = st.session_state.judge_prompt_template
-            for ri in rows:
-                with st.spinner(f"Fetching row {ri.row_number}…"):
-                    assembled = assemble_row(ri)
-                with st.spinner(f"Running judge for row {ri.row_number}…"):
-                    jr = run_judge_one(
-                        assembled,
-                        prompt,
-                        include_transcript=st.session_state.include_transcript,
-                        include_kb=st.session_state.include_kb,
-                        include_jd=st.session_state.include_jd,
-                        include_audio=st.session_state.include_audio,
-                    )
-                items.append(
-                    {
-                        "row_number": ri.row_number,
-                        "row_input": ri,
-                        "assembled": assembled,
-                        "judge_result": jr,
-                    }
-                )
-            st.session_state.batch_items = items
+            st.session_state._run_judge_active = False
+            st.session_state._fr_row_numbers = [ri.row_number for ri in rows]
+            st.session_state._fr_idx = 0
+            st.session_state.batch_items = []
+            st.session_state._fr_active = True
             st.session_state._last_fetch_spec = st.session_state.row_spec_input.strip()
-            st.success(f"Fetched and ran judge for {len(items)} row(s).")
             st.rerun()
 
 if run_btn:
@@ -683,37 +842,40 @@ if run_btn:
     if not items:
         st.error("Fetch first, then Run.")
     else:
-        prompt = st.session_state.judge_prompt_template
-        for item in items:
-            a = item.get("assembled")
-            if not a:
-                continue
-            with st.spinner(f"Running judge for row {item['row_number']}…"):
-                item["judge_result"] = run_judge_one(
-                    a,
-                    prompt,
-                    include_transcript=st.session_state.include_transcript,
-                    include_kb=st.session_state.include_kb,
-                    include_jd=st.session_state.include_jd,
-                    include_audio=st.session_state.include_audio,
-                )
-        st.session_state.batch_items = items
-        st.success("Run complete.")
+        st.session_state._fr_active = False
+        st.session_state._fr_row_numbers = None
+        st.session_state._fr_idx = 0
+        for it in items:
+            it["judge_result"] = None
+        st.session_state._run_judge_active = True
+        st.session_state._run_judge_idx = 0
         st.rerun()
 
 st.subheader("Results by row")
+if msg_done := st.session_state.pop("_batch_completion_message", None):
+    st.success(msg_done)
 _last = (st.session_state.get("_last_fetch_spec") or "").strip()
 _curr = (st.session_state.row_spec_input or "").strip()
 if csv_path and st.session_state.batch_items and _last and _curr != _last:
     st.warning("Row selection changed since the last fetch. Click **Fetch** or **Fetch and Run** to refresh.")
 
-if not csv_path or not st.session_state.batch_items:
+_fr_busy = bool(st.session_state.get("_fr_active"))
+_has_batch_rows = bool(st.session_state.batch_items)
+
+if not csv_path:
     st.info("Upload a CSV, enter row number(s), then **Fetch** or **Fetch and Run**.")
 elif spec_err:
     st.warning(spec_err)
+elif not _has_batch_rows and not _fr_busy:
+    st.info("Upload a CSV, enter row number(s), then **Fetch** or **Fetch and Run**.")
 else:
     df = load_csv(csv_path)
     compact = bool(st.session_state.get("compact_row_view", False))
+    if st.session_state.batch_items is None:
+        st.session_state.batch_items = []
+    _prog_html = _judge_progress_html()
+    if _prog_html:
+        _render_judge_progress_banner(_prog_html)
     for i, item in enumerate(st.session_state.batch_items):
         _render_one_row_block(
             item,
@@ -721,3 +883,93 @@ else:
             suffix=f"{item['row_number']}_{i}",
             compact=compact,
         )
+    if _prog_html:
+        _render_judge_progress_banner(_prog_html)
+
+    _ran_incremental_step = False
+    if st.session_state.get("_fr_active"):
+        nums_fr = st.session_state.get("_fr_row_numbers") or []
+        idx = int(st.session_state.get("_fr_idx", 0))
+        if nums_fr and idx < len(nums_fr) and csv_path:
+            rn = nums_fr[idx]
+            with st.spinner(f"Fetching and running judge for row {rn}…"):
+                part_rows, _part_errs = collect_batch_row_inputs(csv_path, [rn])
+                if not part_rows:
+                    jr = JudgeResult(
+                        row_number=rn,
+                        call_id="",
+                        raw_output="",
+                        error="Fetch and Run: could not load this row from the CSV (check row number and file).",
+                    )
+                    st.session_state.batch_items = list(st.session_state.batch_items or []) + [
+                        {
+                            "row_number": rn,
+                            "row_input": None,
+                            "assembled": None,
+                            "judge_result": jr,
+                        }
+                    ]
+                else:
+                    ri = part_rows[0]
+                    assembled = assemble_row(ri)
+                    jr = run_judge_one(
+                        assembled,
+                        st.session_state.judge_prompt_template,
+                        include_transcript=st.session_state.include_transcript,
+                        include_kb=st.session_state.include_kb,
+                        include_jd=st.session_state.include_jd,
+                        include_audio=st.session_state.include_audio,
+                    )
+                    st.session_state.batch_items = list(st.session_state.batch_items or []) + [
+                        {
+                            "row_number": ri.row_number,
+                            "row_input": ri,
+                            "assembled": assembled,
+                            "judge_result": jr,
+                        }
+                    ]
+            st.session_state._fr_idx = idx + 1
+            _ran_incremental_step = True
+            if st.session_state._fr_idx >= len(nums_fr):
+                st.session_state._fr_active = False
+                st.session_state._fr_row_numbers = None
+                st.session_state._batch_completion_message = (
+                    f"Fetched and ran judge for {len(nums_fr)} row(s)."
+                )
+        else:
+            st.session_state._fr_active = False
+            st.session_state._fr_row_numbers = None
+    elif st.session_state.get("_run_judge_active"):
+        items = st.session_state.batch_items
+        idx = int(st.session_state.get("_run_judge_idx", 0))
+        if items and idx < len(items):
+            item = items[idx]
+            rn = item["row_number"]
+            with st.spinner(f"Running judge for row {rn}…"):
+                a = item.get("assembled")
+                ri = item.get("row_input")
+                call_id = (getattr(ri, "call_id", "") or "") if ri else ""
+                if not a:
+                    items[idx]["judge_result"] = JudgeResult(
+                        row_number=item["row_number"],
+                        call_id=call_id,
+                        raw_output="",
+                        error="Judge skipped — nothing assembled for this row.",
+                    )
+                else:
+                    items[idx]["judge_result"] = run_judge_one(
+                        a,
+                        st.session_state.judge_prompt_template,
+                        include_transcript=st.session_state.include_transcript,
+                        include_kb=st.session_state.include_kb,
+                        include_jd=st.session_state.include_jd,
+                        include_audio=st.session_state.include_audio,
+                    )
+            st.session_state._run_judge_idx = idx + 1
+            _ran_incremental_step = True
+            if st.session_state._run_judge_idx >= len(items):
+                st.session_state._run_judge_active = False
+                st.session_state._batch_completion_message = f"Run complete ({len(items)} row(s))."
+
+    if _ran_incremental_step:
+        st.rerun()
